@@ -253,7 +253,7 @@ Version 1.4.3 has been played on an **iPhone 14 (iOS 26.6.1)** and an **iPad wit
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --cheats ~/Games/cheats/
 ```
 
-The app then has a **Cheats** menu with every cheat in the file, all off until you choose them; your choices are kept. Cheats that only change values in memory (arrows, rupees, moon jump) switch on and off immediately. Cheats that patch the game's code (for example infinite durability) take effect at the next launch: the code is never made writable while the game runs. A code patch is refused, and listed as not supported, when it would overwrite an instruction this project rewrites or jump out of the game's code. The first time you enable a cheat, your profile is copied to `profile-before-cheats`; cheats can corrupt saves on a real console too.
+The app then lists every cheat in the file, all off until you choose them, in a **Cheats** menu and in a panel over the game (key **4**; ↑↓ select, Space toggles, 4 or Esc closes, and the game does not receive those keys while it is open). Your choices are kept. Cheats that only change values in memory (arrows, rupees, moon jump) switch on and off immediately. Cheats that patch the game's code (for example infinite durability) take effect at the next launch: the code is never made writable while the game runs. A code patch is refused, and listed as not supported, when it would overwrite an instruction this project rewrites or jump out of the game's code. The first time you enable a cheat, your profile is copied to `profile-before-cheats`; cheats can corrupt saves on a real console too.
 
 ## Controls
 
@@ -566,7 +566,7 @@ python3.14 build_app.py ~/Games/botw-base.nsp -k ~/keys/prod.keys --update ~/Gam
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --cheats ~/Games/cheats/
 ```
 
-App 菜单栏随即出现 **作弊** 菜单，列出文件中的全部作弊码，默认全部关闭，选择会被保存。只改内存数值的作弊码（箭、卢比、月球跳）立即开关；修改游戏代码的作弊码（如无限耐久）在下次启动时生效，游戏运行期间不会让代码变为可写。若代码补丁会覆盖本项目改写的指令，或跳出游戏代码，则拒绝并标为不支持。第一次启用作弊码时，档案会先复制到 `profile-before-cheats`；与实机一样，作弊码可能损坏存档。
+App 随即在菜单栏的 **作弊** 菜单和游戏画面上的面板（按 **4**；↑↓ 选择、空格切换、4 或 Esc 关闭，面板打开时这些按键不传给游戏）中列出文件里的全部作弊码，默认全部关闭，选择会被保存。只改内存数值的作弊码（箭、卢比、月球跳）立即开关；修改游戏代码的作弊码（如无限耐久）在下次启动时生效，游戏运行期间不会让代码变为可写。若代码补丁会覆盖本项目改写的指令，或跳出游戏代码，则拒绝并标为不支持。第一次启用作弊码时，档案会先复制到 `profile-before-cheats`；与实机一样，作弊码可能损坏存档。
 
 ## 操作
 
