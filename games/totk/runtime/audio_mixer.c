@@ -106,6 +106,13 @@ static int prefill_blocks(void) {   // read once before the device starts (audio
     }
     return blocks;
 }
+/* While the game waits for its shader warm-up (nvn_mtl.m warm_start, TOTK_WAIT_SHADERS) its audio thread keeps mixing;
+   the output stays silent and what was mixed is dropped, as when nothing plays. */
+static _Atomic int g_audio_held;
+void runtime_audio_hold(int on) {
+    atomic_store(&g_audio_held, on ? 1 : 0);
+    fprintf(stderr, "[totk-audio] output %s\n", on ? "held while the shaders warm up" : "released");
+}
 static OSStatus pull(void *ctx, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *io) {
     (void)flags; (void)ts; (void)bus;
     Mixer *m = ctx; float *out = io->mBuffers[0].mData;
@@ -113,7 +120,7 @@ static OSStatus pull(void *ctx, AudioUnitRenderActionFlags *flags, const AudioTi
     unsigned epoch=atomic_load_explicit(&m->stop_epoch,memory_order_acquire);
     uint64_t rd = atomic_load(&m->rd), wr = atomic_load_explicit(&m->wr, memory_order_acquire), have = wr - rd;
     if(epoch!=m->callback_epoch){uint64_t until=atomic_load_explicit(&m->flush_until,memory_order_acquire);if(until>rd){rd=until<wr?until:wr;atomic_store_explicit(&m->rd,rd,memory_order_release);}have=wr-rd;m->callback_epoch=epoch;m->ready=0;}
-    if(!atomic_load_explicit(&m->playing,memory_order_acquire)){
+    if(!atomic_load_explicit(&m->playing,memory_order_acquire)||atomic_load_explicit(&g_audio_held,memory_order_acquire)){
         memset(out,0,(size_t)frames*2*sizeof(float));m->ready=0;atomic_store_explicit(&m->rd,wr,memory_order_release);return noErr;
     }
     uint64_t prefill=(uint64_t)m->frame*(uint64_t)prefill_blocks();if(prefill<frames)prefill=frames;if(prefill>RING_FRAMES)prefill=RING_FRAMES;

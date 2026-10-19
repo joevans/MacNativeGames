@@ -6764,9 +6764,21 @@ static void warm_start(void) {
     // The title's list must be ready before its first frame. The other lists,
     // the prepared shaders and the remaining translated variants finish behind
     // the menu, then mtl_warm_wait at save-load waits before entering play.
+    // TOTK_WAIT_SHADERS (default on): the game waits here for the whole warm-up instead, behind the start screen and its
+    // progress bar, and its sound is held until then (the game's audio thread keeps mixing while this thread waits), so
+    // nothing of the game runs or is heard before the initial shaders are ready. TOTK_WAIT_SHADERS=0: title first.
+    const char *wait_env = getenv("TOTK_WAIT_SHADERS");
+#if TARGET_OS_IPHONE
+    int wait_all = wait_env && !strcmp(wait_env, "1");   // the phone keeps title first (its full warm-up stays off)
+#else
+    int wait_all = !(wait_env && !strcmp(wait_env, "0"));
+#endif
+    extern void runtime_audio_hold(int on);
+    if (wait_all) runtime_audio_hold(1);
     uint64_t wait_start = bp_now();
-    while (!atomic_load(&g_warm_priority_done)) usleep(2000);
+    while (wait_all ? atomic_load(&g_warm_running) : !atomic_load(&g_warm_priority_done)) usleep(2000);
     int ms = (int)((bp_now() - wait_start) / 1000000ull) + 1;
+    if (wait_all) { runtime_audio_hold(0); MLOG("TOTK_WAIT_SHADERS: the game waited %d ms for the whole warm-up before running on", ms); }
     warm_claim();
     MLOG("启动关键管线已就绪：等待 %d ms，可用着色器 %lu / 渲染管线 %llu / 计算管线 %llu；其余后台继续预热",
          ms, (unsigned long)g_shcache.count, g_warm_claim_rps, g_warm_claim_cps);
