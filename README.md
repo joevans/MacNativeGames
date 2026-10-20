@@ -246,7 +246,7 @@ python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --hub --all-versions
 ```
 
-**Your games folder.** The hub has a folder for your game files: `~/Games/MacNativeGames` unless you choose another one with **Change…** below the games (**Show in Finder** opens it). Put the base game (XCI or NSP), its updates (NSP or NSZ) and `prod.keys` there; a folder with the six `.bfttf` shared fonts, or a `firmware` folder, can go there too. Run the build with `--hub` and no game file, and it builds everything in that folder: each file is identified by its verified code, never by its name. The hub lists each file as in the hub, not added yet, or not used (with the reason). After the first build, **Add New Games…** runs the build again in Terminal for the new files, and the hub reopens when it is done. The build remembers the folder (`--library <folder>` changes it), the hub's location and its work folder in `~/Library/Application Support/MacNativeGames/library.json`.
+**Your games folder.** The hub has a folder for your game files: `~/Games/MacNativeGames` unless you choose another one with **Change…** below the games (**Show in Finder** opens it). Put the base game (XCI or NSP), its updates (NSP or NSZ) and `prod.keys` there; a folder with the six `.bfttf` shared fonts, or a `firmware` folder, can go there too. Run the build with `--hub` and no game file, and it builds everything in that folder: each file is identified by its verified code, never by its name. The hub lists each file as in the hub, not added yet, or not used (with the reason). After the first build, each file not in the hub yet has an **Add** button (so has its version's **+** on the game's card): it builds that one version in Terminal (`--only <file>`, about 15 minutes; the hub's other versions stay), and the hub reopens when it is done. The build remembers the folder (`--library <folder>` changes it), the hub's location and its work folder in `~/Library/Application Support/MacNativeGames/library.json`.
 
 ```sh
 python3.14 build_app.py --hub                                     # the games folder, into ~/Applications/MacNativeGames.app
@@ -570,7 +570,7 @@ python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --hub --all-versions
 ```
 
-**你的游戏文件夹。** 大厅有一个放游戏文件的文件夹：默认是 `~/Games/MacNativeGames`，可以用游戏下方的 **更改…** 换成别的（**在访达中显示** 会打开它）。把本体（XCI 或 NSP）、更新（NSP 或 NSZ）和 `prod.keys` 放进去；装着六个 `.bfttf` 共享字体的文件夹或 `firmware` 文件夹也可以放进去。用 `--hub` 且不写游戏文件来打包，就会打包这个文件夹里的所有内容：每个文件都按校验过的代码识别，从不看文件名。大厅会列出每个文件：已在大厅、还没加入，或不使用（并说明原因）。第一次打包之后，**加入新游戏…** 会在终端里为新文件重新打包，完成后大厅自动重新打开。打包会把文件夹（用 `--library <文件夹>` 更改）、大厅的位置和工作文件夹记在 `~/Library/Application Support/MacNativeGames/library.json`。
+**你的游戏文件夹。** 大厅有一个放游戏文件的文件夹：默认是 `~/Games/MacNativeGames`，可以用游戏下方的 **更改…** 换成别的（**在访达中显示** 会打开它）。把本体（XCI 或 NSP）、更新（NSP 或 NSZ）和 `prod.keys` 放进去；装着六个 `.bfttf` 共享字体的文件夹或 `firmware` 文件夹也可以放进去。用 `--hub` 且不写游戏文件来打包，就会打包这个文件夹里的所有内容：每个文件都按校验过的代码识别，从不看文件名。大厅会列出每个文件：已在大厅、还没加入，或不使用（并说明原因）。第一次打包之后，还没加入大厅的每个文件旁边都有 **加入** 按钮（游戏卡片上该版本的 **+** 也一样）：它会在终端里只打包这一个版本（`--only <文件>`，大约 15 分钟；大厅里的其他版本保留），完成后大厅自动重新打开。打包会把文件夹（用 `--library <文件夹>` 更改）、大厅的位置和工作文件夹记在 `~/Library/Application Support/MacNativeGames/library.json`。
 
 ```sh
 python3.14 build_app.py --hub                                     # 游戏文件夹，打包到 ~/Applications/MacNativeGames.app

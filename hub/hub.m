@@ -11,8 +11,9 @@
 // once the game has run, how far its last warm-up got (the file game.json "status" names, written by the game).
 // Below the games, "Game files" names the player's games folder (library.json, shared with build_app.py; Change...
 // picks another, Show in Finder opens it) and lists what is in it, with what the last build found (library-files.json,
-// build_app.py scan_library): in the hub, not added yet, or not used and why. "Add new games..." runs build_app.py again
-// in Terminal (how is in library.json "builder", left by the last hub build) and quits; the build opens the hub again.
+// build_app.py scan_library): in the hub, not added yet, or not used and why. A file not in the hub yet has an Add
+// button (so has its version's "+" pill on the game's card): it runs build_app.py --only <file> in Terminal, one version
+// per build (how is in library.json "builder", left by the last hub build), and quits; the build opens the hub again.
 // Nothing here opens the player's game files, keys or saves: it lists the folder, and each launcher reads its game.
 //   --check          (build_app.py, after packaging) every game's launcher --check; exits non-zero if one fails
 //   MNG_GAME=<id>    starts that game without showing the hub, and the hub does not come back after it
@@ -246,7 +247,7 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
 @property (nonatomic) NSArray<HubGame *> *games;
 @property NSArray<HubTitle *> *titles;
 @property NSInteger selected;
-@property (copy) void (^onAdd)(void);   // a version that is not in the hub yet: "Add New Games"
+@property (copy) void (^onAdd)(HubGame *);   // a version that is not in the hub yet: build it from its file
 @property BOOL canAdd;
 @end
 
@@ -435,7 +436,7 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     HubTitle *t = self.titles[self.selected];
     HubGame *g = t.options[t.chosen];
     if (g.launcher) hub_launch(g, YES);
-    else if (self.canAdd && self.onAdd) self.onAdd();
+    else if (self.canAdd && self.onAdd) self.onAdd(g);
     else NSBeep();
 }
 
@@ -506,8 +507,15 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
 @property HubGrid *grid;
 @property HubPad *pad;
 @property NSTextField *folderLabel;
-@property NSTextView *files;
-@property NSButton *addButton;
+@property NSStackView *files;
+@property NSMutableArray<NSString *> *addable;   // the Add buttons' files (button tag: index)
+@property NSMutableDictionary<NSString *, NSString *> *pendingFiles;   // "<game key> <version>" -> its file, for the cards
+@end
+
+@interface HubFlipped : NSView   // the game file rows, from the top
+@end
+@implementation HubFlipped
+- (BOOL)isFlipped { return YES; }
 @end
 
 @implementation HubDelegate
@@ -532,28 +540,53 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     for (HubGame *g in self.grid.games) [inHub addObject:[NSString stringWithFormat:@"%@ %@", g.key, g.version]];
     NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *found = [NSMutableDictionary dictionary];   // for the cards' pills
 
-    NSMutableAttributedString *text = [NSMutableAttributedString new];
+    NSDictionary *builder = [library_settings()[@"builder"] isKindOfClass:NSDictionary.class] ? library_settings()[@"builder"] : nil;
+    BOOL canBuild = [builder[@"script"] isKindOfClass:NSString.class] && [fm isExecutableFileAtPath:builder[@"python"]] &&
+                    [fm fileExistsAtPath:builder[@"script"]];
+    BOOL keys = NO;
+    for (NSString *name in [fm contentsOfDirectoryAtPath:folder error:nil])
+        if ([name.pathExtension.lowercaseString isEqualToString:@"keys"]) keys = YES;
+    NSString *cannot = !canBuild ? UI("找不到上次打包用的 build_app.py：在终端里运行 python3 build_app.py --hub",
+                                      "The build_app.py of the last build is not found: run python3 build_app.py --hub in Terminal")
+                     : !keys ? UI("先把 prod.keys 放进这个文件夹", "Put prod.keys in this folder first") : nil;
+    for (NSView *v in self.files.arrangedSubviews.copy) [v removeFromSuperview];
+    self.addable = [NSMutableArray array];
+    self.pendingFiles = [NSMutableDictionary dictionary];
     NSFont *font = [NSFont systemFontOfSize:12];
-    NSMutableParagraphStyle *oneLine = [NSMutableParagraphStyle new];
-    oneLine.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    void (^line)(NSString *, NSColor *, NSString *, NSString *) = ^(NSString *mark, NSColor *color, NSString *status, NSString *name) {
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:[mark stringByAppendingString:@"  "]
-            attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:12 weight:NSFontWeightBold], NSForegroundColorAttributeName: color}]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:status
-            attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.labelColor}]];
-        if (name) [text appendAttributedString:[[NSAttributedString alloc] initWithString:[@"   " stringByAppendingString:name]
-            attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: NSColor.secondaryLabelColor}]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:@{NSFontAttributeName: font}]];
-        [text addAttribute:NSParagraphStyleAttributeName value:oneLine range:NSMakeRange(0, text.length)];
+    /* One line: mark, status, the file's name (shortened in the middle when long), and Add for a file to build. */
+    void (^line)(NSString *, NSColor *, NSString *, NSString *, NSString *) = ^(NSString *mark, NSColor *color, NSString *status,
+                                                                             NSString *name, NSString *add) {
+        NSTextField *m = [self label:mark size:12 weight:NSFontWeightBold color:color];
+        NSTextField *st = [self label:status size:12 weight:NSFontWeightRegular color:NSColor.labelColor];
+        NSTextField *n = [self label:name ?: @"" size:12 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
+        n.font = font; n.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [n setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [n setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObjects:m, st, n, nil];
+        if (add) {
+            NSButton *b = [self button:UI("加入", "Add") action:@selector(addFile:)];
+            b.tag = (NSInteger)self.addable.count; [self.addable addObject:add];
+            b.enabled = !cannot;
+            b.toolTip = cannot ?: UI("在终端里打包这个版本（大约 15 分钟）；完成后大厅会重新打开",
+                                     "Builds this version in Terminal (about 15 minutes); the hub opens again when it is done");
+            [views addObject:b];
+        }
+        NSStackView *row = [NSStackView stackViewWithViews:views];
+        row.spacing = 8; row.translatesAutoresizingMaskIntoConstraints = NO;
+        row.distribution = NSStackViewDistributionFill;   // the name takes the room, Add sits on the right
+        [row setCustomSpacing:4 afterView:m];
+        [self.files addArrangedSubview:row];
+        [row.widthAnchor constraintEqualToAnchor:self.files.widthAnchor].active = YES;
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:21].active = YES;
     };
     NSArray *names = [[fm contentsOfDirectoryAtPath:folder error:nil] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
-    NSInteger pending = 0, gameFiles = 0; BOOL keys = NO;
+    NSInteger gameFiles = 0;
     for (NSString *name in names) {
         NSString *ext = name.pathExtension.lowercaseString;
         if (![@[@"xci", @"nsp", @"nsz", @"keys"] containsObject:ext]) continue;
         NSDictionary *attrs = [fm attributesOfItemAtPath:[folder stringByAppendingPathComponent:name] error:nil];
         if (![attrs.fileType isEqualToString:NSFileTypeRegular]) continue;
-        if ([ext isEqualToString:@"keys"]) { keys = YES; line(@"✓", NSColor.systemGreenColor, UI("你的密钥", "Your keys"), name); continue; }
+        if ([ext isEqualToString:@"keys"]) { line(@"✓", NSColor.systemGreenColor, UI("你的密钥", "Your keys"), name, nil); continue; }
         gameFiles++;
         NSDictionary *row = known[name];
         BOOL same = row && [row[@"size"] isKindOfClass:NSNumber.class] && [row[@"size"] unsignedLongLongValue] == attrs.fileSize &&
@@ -570,29 +603,22 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
             }
             BOOL there = game.length ? [inHub containsObject:[NSString stringWithFormat:@"%@ %@", game, version]]
                                      : [[self.grid.games valueForKey:@"version"] containsObject:version ?: @""];   // a list from before "game"
-            if (there) line(@"✓", NSColor.systemGreenColor, [what stringByAppendingString:UI(" · 已在大厅", " · in the hub")], name);
-            else { pending++; line(@"•", NSColor.controlAccentColor, [what stringByAppendingString:UI(" · 还没加入", " · not added yet")], name); }
+            if (there) line(@"✓", NSColor.systemGreenColor, [what stringByAppendingString:UI(" · 已在大厅", " · in the hub")], name, nil);
+            else {
+                if (game.length && version) self.pendingFiles[[NSString stringWithFormat:@"%@ %@", game, version]] = name;
+                line(@"•", NSColor.controlAccentColor, [what stringByAppendingString:UI(" · 还没加入", " · not added yet")], name, name);
+            }
         } else if ([kind isEqual:@"unsupported"]) {
             NSString *note = [row[@"note"] isKindOfClass:NSString.class] ? row[@"note"] : @"";
-            line(@"✕", NSColor.secondaryLabelColor, [NSString stringWithFormat:UI("不使用：%@", "Not used: %@"), note], name);
-        } else { pending++; line(@"•", NSColor.controlAccentColor, UI("新文件 · 加入新游戏时识别", "New · identified when you add new games"), name); }
+            line(@"✕", NSColor.secondaryLabelColor, [NSString stringWithFormat:UI("不使用：%@", "Not used: %@"), note], name, nil);
+        } else line(@"•", NSColor.controlAccentColor, UI("新文件 · 加入时识别", "New · identified when you add it"), name, name);
     }
     if (!gameFiles)
         line(@"•", NSColor.secondaryLabelColor, UI("把游戏文件放在这里：本体（XCI 或 NSP）、更新（NSP 或 NSZ）和 prod.keys。",
-                                                   "Put your game files here: the base game (XCI or NSP), its updates (NSP or NSZ) and prod.keys."), nil);
-    if (!keys) line(@"!", NSColor.systemOrangeColor, UI("这里没有 prod.keys：把你的密钥放进这个文件夹", "No prod.keys here: put your keys in this folder"), nil);
-    [self.files.textStorage setAttributedString:text];
-
-    NSDictionary *builder = [library_settings()[@"builder"] isKindOfClass:NSDictionary.class] ? library_settings()[@"builder"] : nil;
-    BOOL canBuild = [builder[@"script"] isKindOfClass:NSString.class] && [fm isExecutableFileAtPath:builder[@"python"]] &&
-                    [fm fileExistsAtPath:builder[@"script"]];
-    self.addButton.enabled = canBuild && keys && pending > 0;
-    self.grid.canAdd = self.addButton.enabled;
+                                                   "Put your game files here: the base game (XCI or NSP), its updates (NSP or NSZ) and prod.keys."), nil, nil);
+    if (!keys) line(@"!", NSColor.systemOrangeColor, UI("这里没有 prod.keys：把你的密钥放进这个文件夹", "No prod.keys here: put your keys in this folder"), nil, nil);
+    self.grid.canAdd = !cannot;
     [self.grid setGames:self.grid.games folder:found];
-    self.addButton.toolTip = !canBuild ? UI("找不到上次打包用的 build_app.py：在终端里运行 python3 build_app.py --hub",
-                                            "The build_app.py of the last build is not found: run python3 build_app.py --hub in Terminal")
-                           : pending ? UI("在终端里打包新游戏；完成后大厅会重新打开", "Builds the new games in Terminal; the hub opens again when it is done")
-                                     : UI("文件夹里的游戏都已在大厅", "Every game in the folder is in the hub");
 }
 
 - (void)changeFolder:(id)sender {
@@ -612,12 +638,16 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     [NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
     [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:folder]];
 }
-/* Runs build_app.py --hub on the games folder in Terminal, then quits: the build replaces this app and opens it again. */
-- (void)addGames:(id)sender {
+- (void)addFile:(NSButton *)sender {
+    if (sender.tag >= 0 && sender.tag < (NSInteger)self.addable.count) [self addGame:self.addable[sender.tag]];
+}
+/* Runs build_app.py --hub --only <file> on the games folder in Terminal, then quits: the build adds that one version to
+   this app (the others stay) and opens it again. One version per build: each takes about 15 minutes. */
+- (void)addGame:(NSString *)file {
     NSAlert *ask = [NSAlert new];
-    ask.messageText = UI("把新游戏加入大厅？", "Add the new games to the hub?");
-    ask.informativeText = UI("会在终端里打包游戏文件夹中的新版本，每个版本大约 15 分钟。大厅先关闭，完成后自动重新打开。",
-                             "This builds the new versions in your games folder in Terminal, about 15 minutes for each. The hub closes and opens again when it is done.");
+    ask.messageText = UI("把这个版本加入大厅？", "Add this version to the hub?");
+    ask.informativeText = [NSString stringWithFormat:UI("会在终端里打包 %@，大约 15 分钟。大厅先关闭，完成后自动重新打开。",
+                                                        "This builds %@ in Terminal, about 15 minutes. The hub closes and opens again when it is done."), file];
     [ask addButtonWithTitle:UI("开始打包", "Build")];
     [ask addButtonWithTitle:UI("取消", "Cancel")];
     if ([ask runModal] != NSAlertFirstButtonReturn) return;
@@ -627,12 +657,13 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     [script appendFormat:@"cd %@ || exit 1\n", shell_quote([b[@"script"] stringByDeletingLastPathComponent])];
     if ([b[@"developer_dir"] isKindOfClass:NSString.class] && [b[@"developer_dir"] length])
         [script appendFormat:@"export DEVELOPER_DIR=%@\n", shell_quote(b[@"developer_dir"])];
-    [script appendFormat:@"%@ %@ --hub %@%@\n", shell_quote(b[@"python"]), shell_quote(b[@"script"]), shell_quote(hub),
+    [script appendFormat:@"%@ %@ --hub %@ --library %@ --only %@%@\n", shell_quote(b[@"python"]), shell_quote(b[@"script"]), shell_quote(hub),
+        shell_quote(library_folder()), shell_quote(file),
         [b[@"work"] isKindOfClass:NSString.class] ? [@" --work " stringByAppendingString:shell_quote(b[@"work"])] : @""];
     [script appendFormat:@"if [ $? -eq 0 ]; then echo; echo %@; else echo; echo %@; fi\nopen %@\n",
         shell_quote(UI("完成：大厅会重新打开。", "Done: the hub opens again.")),
         shell_quote(UI("打包停止了（原因见上面）；大厅保持原样重新打开。", "The build stopped (see above); the hub opens again as it was.")), shell_quote(hub)];
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"MacNativeGames - Add new games.command"];
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"MacNativeGames - Add a game.command"];
     NSError *error = nil;
     if (![script writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error] ||
         ![NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:path error:&error]) {
@@ -679,8 +710,8 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     NSTextField *heading = [self label:UI("选择游戏", "Choose a game") size:26 weight:NSFontWeightBold color:NSColor.labelColor];
     NSString *hint = games.count ? UI("← → 选择游戏 · ↑ ↓ 或手柄 L / R 选择版本 · 回车或 A 键开始 · ⌘Q 退出",
                                       "← → choose a game · ↑ ↓ or L / R choose the version · Return or A to play · ⌘Q to quit")
-                                 : UI("这个 App 里还没有游戏：把你的游戏文件和 prod.keys 放进下面的文件夹，再点“加入新游戏”。",
-                                      "No games in this app yet: put your game files and prod.keys in the folder below and click Add New Games.");
+                                 : UI("这个 App 里还没有游戏：把你的游戏文件和 prod.keys 放进下面的文件夹，再点游戏旁边的“加入”。",
+                                      "No games in this app yet: put your game files and prod.keys in the folder below and click Add next to the game.");
     NSTextField *footer = [self label:hint size:12 weight:NSFontWeightRegular color:NSColor.secondaryLabelColor];
     footer.lineBreakMode = NSLineBreakByTruncatingTail;
     [footer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -692,7 +723,10 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     scroll.documentView = self.grid;
     [self.grid setGames:games folder:@{}];
     __weak HubDelegate *weakSelf = self;
-    self.grid.onAdd = ^{ [weakSelf addGames:nil]; };
+    self.grid.onAdd = ^(HubGame *g) {   // the card's "+" version: its file
+        NSString *file = weakSelf.pendingFiles[[NSString stringWithFormat:@"%@ %@", g.key, g.version]];
+        if (file) [weakSelf addGame:file]; else NSBeep();
+    };
 
     NSBox *rule = [NSBox new]; rule.boxType = NSBoxSeparator; rule.translatesAutoresizingMaskIntoConstraints = NO;
     NSTextField *filesHeading = [self label:UI("游戏文件", "Game files") size:13 weight:NSFontWeightSemibold color:NSColor.labelColor];
@@ -701,13 +735,28 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     [self.folderLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSButton *change = [self button:UI("更改…", "Change…") action:@selector(changeFolder:)];
     NSButton *show = [self button:UI("在访达中显示", "Show in Finder") action:@selector(showFolder:)];
-    self.addButton = [self button:UI("加入新游戏…", "Add New Games…") action:@selector(addGames:)];
-    NSScrollView *filesScroll = [NSTextView scrollableTextView];
+    NSScrollView *filesScroll = [NSScrollView new];
     filesScroll.translatesAutoresizingMaskIntoConstraints = NO; filesScroll.drawsBackground = NO;
-    self.files = filesScroll.documentView;
-    self.files.editable = NO; self.files.drawsBackground = NO; self.files.textContainerInset = NSMakeSize(0, 4);
+    filesScroll.hasVerticalScroller = YES; filesScroll.autohidesScrollers = YES;
+    HubFlipped *filesDoc = [HubFlipped new];
+    filesDoc.translatesAutoresizingMaskIntoConstraints = NO;
+    filesScroll.documentView = filesDoc;
+    self.files = [NSStackView new];
+    self.files.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.files.alignment = NSLayoutAttributeLeading; self.files.spacing = 2;
+    self.files.translatesAutoresizingMaskIntoConstraints = NO;
+    [filesDoc addSubview:self.files];
+    [NSLayoutConstraint activateConstraints:@[
+        [filesDoc.topAnchor constraintEqualToAnchor:filesScroll.contentView.topAnchor],
+        [filesDoc.leadingAnchor constraintEqualToAnchor:filesScroll.contentView.leadingAnchor],
+        [filesDoc.widthAnchor constraintEqualToAnchor:filesScroll.contentView.widthAnchor],
+        [self.files.topAnchor constraintEqualToAnchor:filesDoc.topAnchor constant:4],
+        [self.files.leadingAnchor constraintEqualToAnchor:filesDoc.leadingAnchor],
+        [self.files.trailingAnchor constraintEqualToAnchor:filesDoc.trailingAnchor],
+        [self.files.bottomAnchor constraintEqualToAnchor:filesDoc.bottomAnchor constant:-4],
+    ]];
 
-    for (NSView *v in @[heading, scroll, rule, filesHeading, self.folderLabel, change, show, self.addButton, filesScroll, footer])
+    for (NSView *v in @[heading, scroll, rule, filesHeading, self.folderLabel, change, show, filesScroll, footer])
         [content addSubview:v];
     [NSLayoutConstraint activateConstraints:@[
         [rule.topAnchor constraintEqualToAnchor:scroll.bottomAnchor constant:8],
@@ -721,13 +770,11 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
         [change.centerYAnchor constraintEqualToAnchor:filesHeading.centerYAnchor],
         [show.leadingAnchor constraintEqualToAnchor:change.trailingAnchor constant:6],
         [show.centerYAnchor constraintEqualToAnchor:filesHeading.centerYAnchor],
-        [self.addButton.leadingAnchor constraintEqualToAnchor:show.trailingAnchor constant:6],
-        [self.addButton.centerYAnchor constraintEqualToAnchor:filesHeading.centerYAnchor],
-        [self.addButton.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-MARGIN],
+        [show.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-MARGIN],
         [filesScroll.topAnchor constraintEqualToAnchor:filesHeading.bottomAnchor constant:8],
         [filesScroll.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:MARGIN],
         [filesScroll.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-MARGIN],
-        [filesScroll.heightAnchor constraintEqualToConstant:118],
+        [filesScroll.heightAnchor constraintEqualToConstant:146],   // six files without scrolling
         [heading.topAnchor constraintEqualToAnchor:content.topAnchor constant:24],
         [heading.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:MARGIN],
         [scroll.topAnchor constraintEqualToAnchor:heading.bottomAnchor constant:16],

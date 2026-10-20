@@ -82,7 +82,7 @@ GAME_LANGUAGES = ('en', 'ja', 'fr', 'de', 'es', 'it', 'nl', 'ru', 'ko', 'zh-Hans
 HUB_NAME = 'MacNativeGames'   # the hub app: one app, every game built into it (--hub)
 HUB_ID = 'org.macnativegames.hub'
 # The player's games folder (build_app.py --hub with no game file, and the hub's "Game files"): library.json holds the
-# folder, the hub's place and how to run this script again (the hub's "Add new games"); library-files.json what the last
+# folder, the hub's place and how to run this script again (the hub's Add buttons); library-files.json what the last
 # build found in the folder, which the hub lists.
 SUPPORT = Path.home() / 'Library/Application Support/MacNativeGames'
 DEFAULT_LIBRARY = Path.home() / 'Games/MacNativeGames'
@@ -338,7 +338,7 @@ _work_locks = {}   # work folder -> its open, locked .build-lock
 
 def lock_work(work):
     """One build at a time in a work folder (two would rewrite the same files): an exclusive lock on work/.build-lock,
-    held until this process ends, so the hub's "Add New Games" cannot start a second build over a running one."""
+    held until this process ends, so the hub's Add buttons cannot start a second build over a running one."""
     import atexit, fcntl
     work = work.resolve()
     if work in _work_locks:
@@ -569,12 +569,13 @@ def identify_base(tree, game, keys, logs):
     return True
 
 
-def scan_library(tree, folder, keys, logs):
+def scan_library(tree, folder, keys, logs, only=None):
     """Everything in the games folder, identified by verified code: the base game, each supported update, and the
     rest with the reason it is not used. Writes library-files.json for the hub. Returns (base game, [(version,
-    update package)])."""
+    update package)]): the base game ('v0', None) and every update, or only: the version of the file with that name
+    (the hub's Add button, one version per build)."""
     say(f'looking at the game files in {folder}')
-    base, updates, rows = None, {}, []
+    base, updates, rows, versions = None, {}, [], {}   # versions: file name -> version
     for path in sorted(folder.iterdir()):
         if not path.is_file() or path.suffix.lower() not in ('.xci', '.nsp', '.nsz', '.keys'):
             continue
@@ -590,7 +591,7 @@ def scan_library(tree, folder, keys, logs):
             if base:
                 row.update(kind='unsupported', note=f'{EXPECTED["display_version"]} again (already {base.name})')
             else:
-                base = path
+                base, versions[path.name] = path, 'v0'
         elif path.suffix.lower() == '.xci':
             row.update(kind='unsupported', note='not the supported base game')
         else:
@@ -605,12 +606,18 @@ def scan_library(tree, folder, keys, logs):
             if version in updates:
                 row.update(kind='unsupported', note=f'{row["version"]} again (already {updates[version][0].name})')
             else:
-                updates[version] = (path, source)
+                updates[version], versions[path.name] = (path, source), version
         say(f'   {path.name}: {row.get("version") or row.get("note") or row["kind"]}')
     write_json(SUPPORT / 'library-files.json', dict(folder=str(folder), files=rows))
     if not base:
         raise BuildError(f'no supported base game (TOTK 1.0.0, XCI or NSP) in {folder}; put it there with its updates and prod.keys')
-    return base, [(v, updates[v][1]) for v in UPDATES if v in updates]
+    builds = [('v0', None)] + [(v, updates[v][1]) for v in UPDATES if v in updates]
+    if only is not None:
+        if only not in versions:
+            row = next((r for r in rows if r['name'] == only), None)
+            raise BuildError(f'{only}: ' + (row.get('note') or 'not a game file') if row else f'no {only} in {folder}')
+        builds = [b for b in builds if b[0] == versions[only]]
+    return base, builds
 
 
 def library_fonts(folder, work):
@@ -2014,6 +2021,9 @@ def parse_args(argv):
     ap.add_argument('--library', type=Path, metavar='FOLDER',
                     help=f'with --hub and no game file: your games folder, remembered for next time and shown in the hub '
                          f'(default: the last one, else {DEFAULT_LIBRARY})')
+    ap.add_argument('--only', metavar='FILE',
+                    help='with --hub and no game file: add only the version of this file in the games folder (its name), '
+                         'as the hub\'s Add button does; the hub\'s other versions stay')
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--hub', type=Path, nargs='?', const=True, metavar='HUB.app',
                     help=f'add the game to the hub app ({HUB_NAME}.app next to the game file unless named), which shows every '
@@ -2065,9 +2075,9 @@ def main(argv):
             args.firmware, args.shared_fonts = library_fonts(library, args.work.expanduser().resolve())
         work = args.work.expanduser().resolve()
         tree = prepare_work(work, prerequisites(args), work / 'logs')
-        args.game, library_builds = scan_library(tree, library, args.keys.expanduser().resolve(), work / 'logs')
-    elif args.library:
-        raise BuildError('--library is the games folder for a hub build without a game file')
+        args.game, library_builds = scan_library(tree, library, args.keys.expanduser().resolve(), work / 'logs', only=args.only)
+    elif args.library or args.only:
+        raise BuildError('--library and --only are for a hub build from the games folder, without a game file')
     game, keys = args.game.expanduser().resolve(), args.keys.expanduser().resolve() if args.keys else None
     if keys is None:
         raise BuildError('name your prod.keys with -k')
@@ -2241,11 +2251,11 @@ def main(argv):
         builds = [identify_update(tree, update, keys, logs)]
     elif args.all_versions or library_builds is not None:
         if library_builds is not None:
-            builds += library_builds
+            builds = library_builds
         else:
             folder = args.updates_dir.expanduser().resolve() if args.updates_dir else game.parent
             builds += find_updates(tree, folder, game, keys, logs)
-        new = [v for v, _ in builds[1:] if not (tree / f'extracted/{v}/romfs/romfs.bin').exists()]
+        new = [v for v, _ in builds if v != 'v0' and not (tree / f'extracted/{v}/romfs/romfs.bin').exists()]
         if new and free < 19 * len(new) + 5:
             raise BuildError(f'{len(new)} new versions need about {19 * len(new)} GB free in the work folder ({free:.0f} GB free)')
     step_code(tree, game, keys, env, logs, mod=None if update else code_mod)
@@ -2279,7 +2289,7 @@ def main(argv):
                 say(f'   the Mac reminder for iPhone / iPad shader contributions was not installed: {e}')
     elif args.hub:
         step_hub(tree, out, logs, [v for v, _ in builds])
-        # How the hub's "Add new games" runs this script again: the same Python, work folder and Xcode
+        # How the hub's Add buttons run this script again: the same Python, work folder and Xcode
         save_library_settings(hub=str(out), builder=dict(
             python=sys.executable, script=str(Path(__file__).resolve()), work=str(work),
             developer_dir=os.environ.get('DEVELOPER_DIR', '')))

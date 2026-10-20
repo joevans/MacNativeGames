@@ -164,7 +164,7 @@ class GamesFolder(unittest.TestCase):
              patch.object(build_app, 'identify_update', side_effect=identify_update), patch.object(build_app, 'say'):
             base, updates = build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs')
         self.assertEqual(base, self.folder / 'base.nsp')
-        self.assertEqual(updates, [('v143', self.folder / 'u143.nsp')])
+        self.assertEqual(updates, [('v0', None), ('v143', self.folder / 'u143.nsp')])
         index = json.loads((self.root / 'support/library-files.json').read_text())
         self.assertEqual(index['folder'], str(self.folder))
         rows = {r['name']: r for r in index['files']}
@@ -176,6 +176,28 @@ class GamesFolder(unittest.TestCase):
         self.assertEqual(rows['other.nsp']['note'], 'not a supported game file')
         self.assertEqual(rows['prod.keys']['kind'], 'keys')
         self.assertEqual(rows['base.nsp']['size'], (self.folder / 'base.nsp').stat().st_size)
+
+    def test_only_one_file_builds_its_version_alone(self):
+        self.nsp('base.nsp', 'a.nca')
+        self.nsp('u143.nsp', '0100f2c0115b68000000000000000010.tik')
+        self.nsp('other.nsp', 'c.nca')
+        def identify_update(_tree, path, _keys, _logs):
+            if path.name == 'u143.nsp': return 'v143', path
+            raise build_app.BuildError('unsupported update module hashes')
+        def scan(only):
+            with patch.object(build_app, 'identify_base', side_effect=lambda _t, path, _k, _l: path.name == 'base.nsp'), \
+                 patch.object(build_app, 'identify_update', side_effect=identify_update), patch.object(build_app, 'say'):
+                return build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs', only=only)
+        self.assertEqual(scan('u143.nsp'), (self.folder / 'base.nsp', [('v143', self.folder / 'u143.nsp')]))
+        self.assertEqual(scan('base.nsp'), (self.folder / 'base.nsp', [('v0', None)]))
+        with self.assertRaisesRegex(build_app.BuildError, 'other.nsp: not a supported game file'):
+            scan('other.nsp')
+        with self.assertRaisesRegex(build_app.BuildError, 'no gone.nsp in'):
+            scan('gone.nsp')
+
+    def test_only_needs_the_games_folder(self):
+        with self.assertRaisesRegex(build_app.BuildError, '--library and --only'):
+            build_app.main([str(self.folder / 'base.nsp'), '-k', str(self.folder / 'prod.keys'), '--hub', '--only', 'base.nsp'])
 
     def test_no_base_game_is_an_error(self):
         with patch.object(build_app, 'say'), self.assertRaisesRegex(build_app.BuildError, 'no supported base game'):
