@@ -107,6 +107,7 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
  pthread_mutex_lock(&vsyncLock);for(unsigned i=0;i<vsyncCount;i++)hle_signal_system_event(vsyncEvents[i]);pthread_mutex_unlock(&vsyncLock);return kCVReturnSuccess;
 }
 static int cheat_panel_key(NSEvent *e);
+static void cheat_panel_toggle(void);
 static NSView *cheatPanel;
 @interface TOTKInputView:NSView
 @property(strong) NSTimer *cursorHideTimer;
@@ -371,13 +372,18 @@ static void cheats_all_off(void){for(int i=0;i<runtime_cheats_count();i++)if(run
  if(k){NSMenuItem *note=[[NSMenuItem alloc] initWithTitle:cheats_pending_note(k) action:nil keyEquivalent:@""];note.enabled=NO;[menu addItem:note];}
  NSMenuItem *off=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("关闭全部作弊码","Turn Off All Cheats")) action:@selector(allOff:) keyEquivalent:@""];
  off.target=self;off.enabled=cheats_any_on();[menu addItem:off];
+ NSMenuItem *panel=[[NSMenuItem alloc] initWithTitle:cheatPanel&&!cheatPanel.hidden?@(TOTK_UI("隐藏作弊码面板","Hide Cheat Panel")):@(TOTK_UI("显示作弊码面板","Show Cheat Panel"))
+                                              action:@selector(panel:) keyEquivalent:@""];   // the only way to open it: no key or button combination
+ panel.target=self;panel.enabled=cheatPanel!=nil;[menu addItem:panel];
 }
+-(void)panel:(NSMenuItem *)item{(void)item;cheat_panel_toggle();}
 -(void)allOff:(NSMenuItem *)item{(void)item;cheats_all_off();}
 -(void)toggle:(NSMenuItem *)item{runtime_cheats_set((int)item.tag,!(runtime_cheats_state((int)item.tag)&CHEAT_ON));}
 @end
 static TOTKCheatMenu *cheatMenu;
-/* Cheat panel (key 6): the same cheats as the menu over the game picture. While it is open the keyboard drives it
-   (Up/Down select, Space/Return toggle, 6/Esc close) instead of the game, which keeps running; rows can be clicked. */
+/* Cheat panel (Cheats menu > Show Cheat Panel): the same cheats as the menu over the game picture. While it is open the
+   keyboard drives it (Up/Down select, Space/Return toggle, Esc closes) instead of the game, which keeps running; rows can
+   be clicked. */
 @interface TOTKFlippedView:NSView
 @end
 @implementation TOTKFlippedView
@@ -394,7 +400,7 @@ static TOTKCheatMenu *cheatMenu;
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){
  self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.05 alpha:0.92].CGColor;self.layer.cornerRadius=12;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:0.2].CGColor;
  self.title=[NSTextField labelWithString:@(TOTK_UI("作弊码","Cheats"))];self.title.font=[NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];self.title.textColor=NSColor.whiteColor;[self addSubview:self.title];
- self.hint=[NSTextField labelWithString:@(TOTK_UI("↑↓ / 方向键 选择 · 空格 / A 切换 · 6 / Esc / B / L3+R3 关闭 · 修改代码的作弊码重启游戏后生效","↑↓ or D-pad select · Space or A toggles · 6, Esc, B or L3+R3 closes · code cheats apply when the game restarts"))];
+ self.hint=[NSTextField labelWithString:@(TOTK_UI("↑↓ / 方向键 选择 · 空格 / A 切换 · Esc / B 关闭 · 修改代码的作弊码重启游戏后生效","↑↓ or D-pad select · Space or A toggles · Esc or B closes · code cheats apply when the game restarts"))];
  self.hint.font=[NSFont systemFontOfSize:11];self.hint.textColor=[NSColor colorWithCalibratedWhite:0.7 alpha:1];self.hint.lineBreakMode=NSLineBreakByTruncatingTail;[self addSubview:self.hint];
  self.note=[NSTextField labelWithString:@""];self.note.font=[NSFont systemFontOfSize:12 weight:NSFontWeightMedium];self.note.textColor=[NSColor colorWithCalibratedRed:1 green:0.85 blue:0.3 alpha:1];self.note.hidden=YES;[self addSubview:self.note];
  self.list=[[TOTKFlippedView alloc] initWithFrame:NSZeroRect];
@@ -439,21 +445,19 @@ static void cheat_panel_toggle(void){
  if(p.hidden){[p reload];p.hidden=NO;runtime_input_clear();}   // keys held when it opens must not stay pressed in the game
  else p.hidden=YES;
 }
-/* Controllers: both sticks pressed together (L3+R3) open and close the panel; D-pad or left stick select, A toggles,
-   B closes. While it is open the game gets no controller input (runtime/gamepad.m). */
-enum { PAD_A = 1, PAD_B = 2, PAD_L3 = 16, PAD_R3 = 32, PAD_UP = 1 << 13, PAD_DOWN = 1 << 15, PAD_STICK_UP = 1 << 16, PAD_STICK_DOWN = 1 << 17 };
+/* Controllers, while the panel is open: D-pad or left stick select, A toggles, B closes; the game gets no controller
+   input meanwhile (runtime/gamepad.m). No button combination opens it: the Cheats menu does. */
+enum { PAD_A = 1, PAD_B = 2, PAD_UP = 1 << 13, PAD_DOWN = 1 << 15, PAD_STICK_UP = 1 << 16, PAD_STICK_DOWN = 1 << 17 };
 static int cheat_panel_pad(uint64_t held, uint64_t pressed){
- TOTKCheatPanel *p=(TOTKCheatPanel *)cheatPanel;if(!p)return 0;
- if((held&(PAD_L3|PAD_R3))==(PAD_L3|PAD_R3)&&(pressed&(PAD_L3|PAD_R3))){cheat_panel_toggle();return 1;}
- if(p.hidden)return 0;
+ (void)held;
+ TOTKCheatPanel *p=(TOTKCheatPanel *)cheatPanel;if(!p||p.hidden)return 0;
  if(pressed&(PAD_UP|PAD_STICK_UP))[p move:-1];
  if(pressed&(PAD_DOWN|PAD_STICK_DOWN))[p move:1];
  if(pressed&PAD_A)[p toggleSelected];
  if(pressed&PAD_B)p.hidden=YES;   // returning 1 keeps this B from the game; it stays hidden until released
  return 1;
 }
-static int cheat_panel_key(NSEvent *e){
- if(e.keyCode==22){if(!e.isARepeat)cheat_panel_toggle();return 1;}   // key 6 (1-5 are the game's display keys)
+static int cheat_panel_key(NSEvent *e){   // no key opens it (the number keys are the game's): Cheats menu > Show Cheat Panel
  TOTKCheatPanel *p=(TOTKCheatPanel *)cheatPanel;if(!p||p.hidden)return 0;
  switch(e.keyCode){
  case 126:[p move:-1];break;                    // up
