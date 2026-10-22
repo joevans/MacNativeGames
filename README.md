@@ -247,7 +247,7 @@ Version 1.4.3 has been played on an **iPhone 14 (iOS 26.6.1)** and an **iPad wit
 
 ### Cheats (optional)
 
-`--cheats` builds a cheat file into the app: an Atmosphère cheat file (the format Atmosphère, Yuzu and Ryujinx use) named after the selected version's build ID, or a folder that holds it. Base 1.0.0 is `082CE09B06E33A12.txt`. Only the file for the version you build is used; one for another version stops the build. The repository ships no cheat codes.
+`--cheats` builds a cheat file into the app: an Atmosphère cheat file (the format Atmosphère, Yuzu and Ryujinx use) named after the selected version's build ID, or a folder that holds it. Base 1.0.0 is `082CE09B06E33A12.txt`. Only the file for the version you build is used; one for another version stops the build, and its message names the file the build wants. The repository ships no cheat codes. Breath of the Wild (Mac, 1.6.0 and 1.9.0) takes `--cheats` the same way and gets the same menu and panel; 1.6.0 is `8E9978D50BDD20B4.txt`.
 
 ```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --cheats ~/Games/cheats/
@@ -560,7 +560,7 @@ python3.14 build_app.py ~/Games/botw-base.nsp -k ~/keys/prod.keys --update ~/Gam
 
 ### 作弊码（可选）
 
-`--cheats` 把作弊码文件装进 App：以所选版本 build ID 命名的 Atmosphère 作弊码文件（Atmosphère、Yuzu、Ryujinx 通用格式），或包含该文件的文件夹。本体 1.0.0 为 `082CE09B06E33A12.txt`。只使用所构建版本的文件；其他版本的文件会让构建停止。仓库本身不附带作弊码。
+`--cheats` 把作弊码文件装进 App：以所选版本 build ID 命名的 Atmosphère 作弊码文件（Atmosphère、Yuzu、Ryujinx 通用格式），或包含该文件的文件夹。本体 1.0.0 为 `082CE09B06E33A12.txt`。只使用所构建版本的文件；其他版本的文件会让构建停止，提示信息会写出构建需要的文件名。仓库本身不附带作弊码。旷野之息（Mac，1.6.0 和 1.9.0）同样使用 `--cheats`，并有相同的菜单和面板；1.6.0 为 `8E9978D50BDD20B4.txt`。
 
 ```sh
 python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --cheats ~/Games/cheats/

@@ -1899,8 +1899,6 @@ def main(argv):
     if which == 'botw':
         if args.platform == 'visionos':
             raise BuildError('Breath of the Wild has no native Vision Pro build yet: use --platform macos or ios')
-        if cheats:
-            raise BuildError('--cheats is for Tears of the Kingdom; Breath of the Wild has no Cheats menu yet (leave out --cheats)')
         if fresh_work and not args.work:   # BotW_build next to the game file, not TOTK_build
             shutil.rmtree(work)
         if mod:
@@ -1935,6 +1933,9 @@ def main(argv):
         botw = work / 'botw'
         say(f'Breath of the Wild {expected["display_version"]}; work folder {work}')
         step_code_botw(tree, botw, update or game, keys, env, logs, version=version)
+        if cheats:   # checked once the ExeFS is in place, before the long steps
+            cheats, count = select_cheats(cheats, main_build_id(tree, version))
+            say(f'4/4 app: building in {count} cheat entries from {cheats.name}')
         step_data_botw(tree, botw, game, keys, logs, version=version, update=update, dlc=dlcs, firmware=firmware, shared_fonts=shared_fonts)
         step_shaders_botw(tree, botw, logs, version=version)
         step_shader_libs(tree, logs, version=version)
@@ -1949,7 +1950,7 @@ def main(argv):
             say('Install it with games/totk/ios/tools/install_device.py' + (f' --game-data {tree}/extracted/{version}/romfs/romfs.bin'
                 if args.ios_game_data == 'documents' else '') + '; saves and the shader cache stay in the app\'s Documents.')
             return
-        step_app(tree, out, logs, version=version, game='botw')
+        step_app(tree, out, logs, version=version, game='botw', cheats=cheats)
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
         say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
         t1 = time.time()

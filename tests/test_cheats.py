@@ -18,6 +18,17 @@ class CheatSelectionTests(unittest.TestCase):
             main.write_bytes(b'NSO0' + bytes(0x3c) + bytes.fromhex(BID) + bytes(0x40))
             self.assertEqual(build_app.main_build_id(tree, 'v0'), BID)
 
+    def test_breath_of_the_wild_build_id(self):   # the same lookup for a Breath of the Wild version folder
+        with tempfile.TemporaryDirectory() as folder:
+            tree = Path(folder)
+            main = tree/'extracted/botw160/exefs/main'
+            main.parent.mkdir(parents=True)
+            main.write_bytes(b'NSO0' + bytes(0x3c) + bytes.fromhex('8E9978D50BDD20B4') + bytes(0x40))
+            self.assertEqual(build_app.main_build_id(tree, 'botw160'), '8E9978D50BDD20B4')
+            (tree/'8E9978D50BDD20B4.txt').write_text(TEXT)
+            path, count = build_app.select_cheats(tree, '8E9978D50BDD20B4')
+            self.assertEqual((path.name, count), ('8E9978D50BDD20B4.txt', 2))
+
     def test_folder_picks_this_build_only(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
