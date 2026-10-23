@@ -21,6 +21,7 @@ typedef struct {
     void *ctx;
     int (*read)(void *ctx, uint64_t addr, void *out, unsigned size);         /* 0: not readable */
     int (*write)(void *ctx, uint64_t addr, const void *in, unsigned size);   /* 0: refused */
+    uint64_t *saved;   /* the 16 saved values (C1 / C2), kept from one run to the next; NULL: zero for each run */
 } CheatEnv;
 /* Runs one cheat program once. Returns 1, or 0 when it stopped early (failed read, refused write, malformed). */
 int cheat_run(const Cheat *c, const CheatEnv *env, char *err, size_t errn);

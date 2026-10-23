@@ -26,14 +26,15 @@ static uint32_t get32(unsigned off) { uint32_t v; memcpy(&v, mem + off, 4); retu
 static uint64_t get64(unsigned off) { uint64_t v; memcpy(&v, mem + off, 8); return v; }
 
 static Cheat cs[8];
-static int run_text(const char *text, uint64_t keys, char *err, size_t errn) {
+static int run_saved(const char *text, uint64_t keys, uint64_t *saved, char *err, size_t errn) {
     char perr[128];
     int n = cheat_parse(text, cs, 8, perr, sizeof perr);
     if (n != 1) { snprintf(err, errn, "parse: %d %s", n, n < 0 ? perr : ""); return -1; }
-    CheatEnv env = {.base = {(uintptr_t)mem, (uintptr_t)mem + 0x8000, 0, 0}, .keys = keys, .read = rd, .write = wr};
+    CheatEnv env = {.base = {(uintptr_t)mem, (uintptr_t)mem + 0x8000, 0, 0}, .keys = keys, .read = rd, .write = wr, .saved = saved};
     err[0] = 0;
     return cheat_run(&cs[0], &env, err, errn);
 }
+static int run_text(const char *text, uint64_t keys, char *err, size_t errn) { return run_saved(text, keys, NULL, err, errn); }
 
 int main(void) {
     char err[160];
@@ -83,6 +84,15 @@ int main(void) {
     CHECK(r == 1 && get32(0x4008) == 0x2A, "type A store of 5+0x25: %08x (%s)", get32(0x4008), err);
     r = run_text("[Mov]\n580A0000 00000600\n400F0000 00000001 00000002\n9899F000\nA89A0000\n", 0, err, sizeof err);
     CHECK(r == 1 && get64(0x4000) == 0x100000002ull, "register move and 64-bit store: %016llx (%s)", (unsigned long long)get64(0x4000), err);
+
+    /* Saved values (C1) carry over from one run to the next when the caller keeps them, and start at zero when it
+       does not: restore R0, add 1, save it, store it. */
+    const char *count = "[Count]\n580A0000 00000600\nC1000000\n78000000 00000001\nC1000010\nA40A0200 00000008\n";
+    uint64_t keep[16] = {0};
+    for (int k = 0; k < 3; k++) r = run_saved(count, 0, keep, err, sizeof err);
+    CHECK(r == 1 && get32(0x4008) == 3 && keep[0] == 3, "kept saved values count runs: %u (%s)", get32(0x4008), err);
+    for (int k = 0; k < 3; k++) r = run_text(count, 0, err, sizeof err);
+    CHECK(r == 1 && get32(0x4008) == 1, "without kept values each run starts at zero: %u (%s)", get32(0x4008), err);
 
     /* Static store into the main module: allowed above the "code", refused inside it (reported). */
     r = run_text("[Data]\n04000000 00000700 12345678\n", 0, err, sizeof err);

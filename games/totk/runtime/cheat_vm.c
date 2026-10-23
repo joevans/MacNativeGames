@@ -4,7 +4,9 @@
 #include <string.h>
 
 /* Encodings follow Atmosphère's dmnt cheat VM (stratosphere/dmnt/source/cheat/impl/dmnt_cheat_vm.cpp). Nibbles are
-   numbered from the most significant: in "5TMRI0AA" nibble 1 is T (width), 2 M (memory type), 3 R (register)... */
+   numbered from the most significant: in "5TMRI0AA" nibble 1 is T (width), 2 M (memory type), 3 R (register)...
+   One addition: the saved values (C1 / C2) can outlive a run (CheatEnv.saved; runtime/cheats.c keeps them per cheat
+   while it stays on), so a cheat can compare with what it saw on its last tick. Atmosphère clears them on every run. */
 #define NIB(x, i) (((x) >> (28 - 4 * (i))) & 0xF)
 
 static int set_err(char *err, size_t errn, const char *fmt, unsigned a, uint32_t b) {
@@ -131,7 +133,8 @@ static unsigned skip_block(const Cheat *c, unsigned i, int stop_at_else) {
 }
 
 int cheat_run(const Cheat *c, const CheatEnv *env, char *err, size_t errn) {
-    uint64_t reg[16] = {0}, saved[16] = {0};
+    uint64_t reg[16] = {0}, fresh[16] = {0};
+    uint64_t *saved = env->saved ? env->saved : fresh;   // kept between runs: a cheat can compare with the last tick
     unsigned loop_top[16] = {0};
     unsigned steps = 0, i = 0;
     while (i < c->n) {
