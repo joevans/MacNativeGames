@@ -1,6 +1,6 @@
 // The hub app (build_app.py --hub compiles it as Contents/MacOS/MacNativeGames): one app with every game built into it.
 // Each game is Contents/Resources/games/<id>/ (build_app.py step_hub):
-//   game.json   {"title", "version", "launcher", "root", "icon"}: what the hub shows and how it starts the game
+//   game.json   {"game", "title", "version", "launcher", "root", "icon", "dlc"}: what the hub shows and how it starts the game
 //   launcher    the game's own launcher (games/<game>/app/launcher.m), the same program a single-game app starts with
 //   <root>/     the game's files, as Contents/Resources/<root> of a single-game app
 // The hub shows the games; picking one (click twice, Return, or A on a controller) replaces the hub with that game's
@@ -11,13 +11,14 @@
 // once the game has run, how far its last warm-up got (the file game.json "status" names, written by the game).
 // Below the games, "Game files" names the player's games folder (library.json, shared with build_app.py; Change...
 // picks another, Show in Finder opens it) and lists what is in it, with what the last build found (library-files.json,
-// build_app.py scan_library): in the hub, not added yet, or not used and why. A file not in the hub yet has an Add
-// button (so has its version's "+" pill on the game's card): it runs build_app.py --only <file> in Terminal, one version
-// per build (how is in library.json "builder", left by the last hub build), and quits; the build opens the hub again.
+// build_app.py scan_library; each file's "adds": the versions it is part of): in the hub, not added yet, or not used and
+// why. A file not in the hub yet has an Add button (so has its version's "+" pill on the game's card): it runs
+// build_app.py --only <file> in Terminal, which builds the versions that file is part of (how is in library.json
+// "builder", left by the last hub build), and quits; the build opens the hub again.
 // Nothing here opens the player's game files, keys or saves: it lists the folder, and each launcher reads its game.
 //   --check          (build_app.py, after packaging) every game's launcher --check; exits non-zero if one fails
 //   MNG_GAME=<id>    starts that game without showing the hub, and the hub does not come back after it
-//                    (open MacNativeGames.app --env MNG_GAME=totk-v143)
+//                    (open MacNativeGames.app --env MNG_GAME=totk-v143, or botw-v190)
 #import <AppKit/AppKit.h>
 #import <GameController/GameController.h>
 #include <errno.h>
@@ -36,6 +37,7 @@ static BOOL chinese(void) { return [NSLocale.preferredLanguages.firstObject hasP
 
 @interface HubGame : NSObject
 @property NSString *ident, *key, *title, *version, *launcher, *root, *shaders;   // key: which game (game.json "game")
+@property NSArray<NSString *> *dlc;   // the add-on content packs in it (game.json "dlc")
 @property NSImage *icon;
 @property double shaderFraction;   // -1: nothing known
 @end
@@ -121,6 +123,7 @@ static NSArray<HubGame *> *hub_games(void) {
         g.ident = name; g.title = info[@"title"];
         g.key = [info[@"game"] isKindOfClass:NSString.class] ? info[@"game"] : g.title;
         g.version = [info[@"version"] isKindOfClass:NSString.class] ? info[@"version"] : @"";
+        g.dlc = [info[@"dlc"] isKindOfClass:NSArray.class] ? info[@"dlc"] : @[];
         g.launcher = [folder stringByAppendingPathComponent:info[@"launcher"]];
         g.root = [folder stringByAppendingPathComponent:info[@"root"]];
         if ([info[@"icon"] isKindOfClass:NSString.class])
@@ -536,8 +539,11 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
         [index[@"files"] isKindOfClass:NSArray.class])
         for (NSDictionary *row in index[@"files"])
             if ([row isKindOfClass:NSDictionary.class] && [row[@"name"] isKindOfClass:NSString.class]) known[row[@"name"]] = row;
-    NSMutableSet<NSString *> *inHub = [NSMutableSet set];   // "<game key> <version>"
-    for (HubGame *g in self.grid.games) [inHub addObject:[NSString stringWithFormat:@"%@ %@", g.key, g.version]];
+    NSMutableSet<NSString *> *inHub = [NSMutableSet set];   // "<game key> <version>", and "<game key> <version> dlc <pack>"
+    for (HubGame *g in self.grid.games) {
+        [inHub addObject:[NSString stringWithFormat:@"%@ %@", g.key, g.version]];
+        for (id pack in g.dlc) [inHub addObject:[NSString stringWithFormat:@"%@ %@ dlc %@", g.key, g.version, pack]];
+    }
     NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *found = [NSMutableDictionary dictionary];   // for the cards' pills
 
     NSDictionary *builder = [library_settings()[@"builder"] isKindOfClass:NSDictionary.class] ? library_settings()[@"builder"] : nil;
@@ -593,29 +599,37 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
                     [row[@"mtime"] isKindOfClass:NSNumber.class] &&
                     fabs([row[@"mtime"] doubleValue] - attrs.fileModificationDate.timeIntervalSince1970) < 1;
         NSString *kind = same ? row[@"kind"] : nil, *version = same ? row[@"version"] : nil;
-        if ([kind isEqual:@"base"] || [kind isEqual:@"update"]) {
-            NSString *what = [kind isEqual:@"base"] ? [NSString stringWithFormat:UI("%@ 本体", "%@ base game"), version]
-                                                    : [NSString stringWithFormat:UI("%@ 更新", "%@ update"), version];
+        if (([kind isEqual:@"base"] || [kind isEqual:@"update"] || [kind isEqual:@"dlc"]) && [version isKindOfClass:NSString.class]) {
+            NSString *title = [row[@"title"] isKindOfClass:NSString.class] ? [row[@"title"] stringByAppendingString:@" "] : @"";
+            NSString *what = [kind isEqual:@"base"] ? [NSString stringWithFormat:UI("%@%@ 本体", "%@%@ base game"), title, version]
+                           : [kind isEqual:@"update"] ? [NSString stringWithFormat:UI("%@%@ 更新", "%@%@ update"), title, version]
+                           : [NSString stringWithFormat:UI("%@%@ 追加内容 %@", "%@%@ DLC %@"), title, version, row[@"pack"]];
             NSString *game = [row[@"game"] isKindOfClass:NSString.class] ? row[@"game"] : @"";
-            if (game.length && version) {
+            NSArray *adds = [row[@"adds"] isKindOfClass:NSArray.class] ? row[@"adds"] : @[version];   // the hub versions it is part of
+            BOOL there = NO;
+            for (NSString *v in adds) {
+                if (![v isKindOfClass:NSString.class]) continue;
+                if (!game.length) {   // a list from before "game"
+                    there = there || [[self.grid.games valueForKey:@"version"] containsObject:v];
+                    continue;
+                }
                 if (!found[game]) found[game] = [NSMutableSet set];
-                [found[game] addObject:version];
+                [found[game] addObject:v];
+                NSString *key = [NSString stringWithFormat:@"%@ %@", game, v];
+                BOOL added = [inHub containsObject:[kind isEqual:@"dlc"] ? [key stringByAppendingFormat:@" dlc %@", row[@"pack"]] : key];
+                there = there || added;
+                if (!added && (!self.pendingFiles[key] || adds.count == 1)) self.pendingFiles[key] = name;   // a version's own file first
             }
-            BOOL there = game.length ? [inHub containsObject:[NSString stringWithFormat:@"%@ %@", game, version]]
-                                     : [[self.grid.games valueForKey:@"version"] containsObject:version ?: @""];   // a list from before "game"
             if (there) line(@"✓", NSColor.systemGreenColor, [what stringByAppendingString:UI(" · 已在大厅", " · in the hub")], name, nil);
-            else {
-                if (game.length && version) self.pendingFiles[[NSString stringWithFormat:@"%@ %@", game, version]] = name;
-                line(@"•", NSColor.controlAccentColor, [what stringByAppendingString:UI(" · 还没加入", " · not added yet")], name, name);
-            }
+            else line(@"•", NSColor.controlAccentColor, [what stringByAppendingString:UI(" · 还没加入", " · not added yet")], name, name);
         } else if ([kind isEqual:@"unsupported"]) {
             NSString *note = [row[@"note"] isKindOfClass:NSString.class] ? row[@"note"] : @"";
             line(@"✕", NSColor.secondaryLabelColor, [NSString stringWithFormat:UI("不使用：%@", "Not used: %@"), note], name, nil);
         } else line(@"•", NSColor.controlAccentColor, UI("新文件 · 加入时识别", "New · identified when you add it"), name, name);
     }
     if (!gameFiles)
-        line(@"•", NSColor.secondaryLabelColor, UI("把游戏文件放在这里：本体（XCI 或 NSP）、更新（NSP 或 NSZ）和 prod.keys。",
-                                                   "Put your game files here: the base game (XCI or NSP), its updates (NSP or NSZ) and prod.keys."), nil, nil);
+        line(@"•", NSColor.secondaryLabelColor, UI("把游戏文件放在这里：本体（XCI 或 NSP）、更新（NSP 或 NSZ）、追加内容和 prod.keys。",
+                                                   "Put your game files here: base games (XCI or NSP), updates (NSP or NSZ), DLC and prod.keys."), nil, nil);
     if (!keys) line(@"!", NSColor.systemOrangeColor, UI("这里没有 prod.keys：把你的密钥放进这个文件夹", "No prod.keys here: put your keys in this folder"), nil, nil);
     self.grid.canAdd = !cannot;
     [self.grid setGames:self.grid.games folder:found];
@@ -657,9 +671,8 @@ static NSString *const kChosen = @"ChosenVersion";   // game key -> the version 
     [script appendFormat:@"cd %@ || exit 1\n", shell_quote([b[@"script"] stringByDeletingLastPathComponent])];
     if ([b[@"developer_dir"] isKindOfClass:NSString.class] && [b[@"developer_dir"] length])
         [script appendFormat:@"export DEVELOPER_DIR=%@\n", shell_quote(b[@"developer_dir"])];
-    [script appendFormat:@"%@ %@ --hub %@ --library %@ --only %@%@\n", shell_quote(b[@"python"]), shell_quote(b[@"script"]), shell_quote(hub),
-        shell_quote(library_folder()), shell_quote(file),
-        [b[@"work"] isKindOfClass:NSString.class] ? [@" --work " stringByAppendingString:shell_quote(b[@"work"])] : @""];
+    [script appendFormat:@"%@ %@ --hub %@ --library %@ --only %@\n", shell_quote(b[@"python"]), shell_quote(b[@"script"]), shell_quote(hub),
+        shell_quote(library_folder()), shell_quote(file)];   // the work folders: library.json "builder" too
     [script appendFormat:@"if [ $? -eq 0 ]; then echo; echo %@; else echo; echo %@; fi\nopen %@\n",
         shell_quote(UI("完成：大厅会重新打开。", "Done: the hub opens again.")),
         shell_quote(UI("打包停止了（原因见上面）；大厅保持原样重新打开。", "The build stopped (see above); the hub opens again as it was.")), shell_quote(hub)];

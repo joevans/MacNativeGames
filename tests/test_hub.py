@@ -14,12 +14,14 @@ from unittest.mock import patch
 import build_app
 
 HUB_SOURCE = build_app.REPO / 'hub/hub.m'
+Build = build_app.HubBuild
 
 
 def fake_tree(root, version):
-    """A work tree with what step_hub copies, every file a few bytes."""
+    """A work tree with what step_hub copies, every file a few bytes; Breath of the Wild 1.9.0 with add-on content 1."""
     tree = root / f'tree-{version}'
-    files = [f'build/totk-native-{version}' if version != 'v0' else 'build/totk-native', 'build/pso_manifest.tsv',
+    files = [f'extracted/{version}/aoc/1/{n}' for n in ('index.json', 'romfs.bin', 'runtime-index.bin')] if version == 'botw190' else []
+    files += [f'build/totk-native-{version}' if version != 'v0' else 'build/totk-native', 'build/pso_manifest.tsv',
              'build/pso_title.tsv', 'build/spirv-cross/spirv-cross', 'prebuilt/macos-arm64/totk_xlate', f'build/app-launcher-{version}',
              'build/hub', 'build/AppIcon.icns', f'extracted/{version}/romfs/romfs.bin',
              f'extracted/{version}/romfs/runtime-index.bin', f'build/shader-seed/{version}/pso_manifest.tsv',
@@ -31,7 +33,7 @@ def fake_tree(root, version):
     lib = tree / f'build/shader-libs/{build_app.sha256(seed / "a_b.metal")}.metallib'   # one of the two compiled ahead
     lib.parent.mkdir(parents=True, exist_ok=True); lib.write_bytes(b'lib')
     (seed / 'seed-manifest.json').write_text(json.dumps(dict(
-        version=version, chain='totk-native-v7-unverified', shaders=8000,
+        version=version, chain='totk-native-v8-unverified', shaders=8000,
         files={n: hashlib.sha256((seed / n).read_bytes()).hexdigest() for n in ('pso_manifest.tsv', 'a_b.metal', 'b_b.metal')})))
     return tree
 
@@ -52,14 +54,17 @@ class StepHub(unittest.TestCase):
         self.logs = self.root / 'logs'
 
     def build(self, *versions):
-        tree = self.root / 'tree'
+        games = []
         for version in versions:
+            game = 'botw' if version.startswith('botw') else 'totk'
+            tree = self.root / f'tree-{game}'
             fake = fake_tree(self.root, version)
             subprocess.run(['rsync', '-a', f'{fake}/', f'{tree}/'], check=True)
+            games.append((tree, game, version))
         with patch.object(build_app, 'sign_app') as signing, patch.object(build_app, 'data_bundle', fake_data_bundle), \
              patch.object(build_app, 'app_seal_valid', return_value=True), \
              patch.object(build_app, 'remove_in_background', build_app.remove_tree):
-            build_app.step_hub(tree, self.hub, self.logs, list(versions))
+            build_app.step_hub(self.hub, self.logs, games)
         signing.assert_called_once_with(self.hub.with_name(self.hub.name + '.partial'), self.logs)
 
     def test_each_version_is_a_game_and_earlier_games_stay(self):
@@ -83,12 +88,27 @@ class StepHub(unittest.TestCase):
             self.assertEqual(romfs.read_bytes(), f'{version} extracted/{version}/romfs/romfs.bin'.encode())
         info = plistlib.loads((self.hub / 'Contents/Info.plist').read_bytes())
         self.assertEqual((info['CFBundleIdentifier'], info['CFBundleExecutable']), (build_app.HUB_ID, build_app.HUB_NAME))
+        self.assertEqual(info['MNGContributionFolder'], str(build_app.contrib_folder()))   # where the launcher puts the shader file
         self.assertTrue((self.hub / f'Contents/MacOS/{build_app.HUB_NAME}').is_file())
         self.assertFalse(self.hub.with_name(self.hub.name + '.partial').exists())
 
     def test_several_versions_in_one_build(self):
         self.build('v0', 'v143')
         self.assertEqual(sorted(p.name for p in (self.hub / 'Contents/Resources/games').iterdir()), ['totk-v0', 'totk-v143'])
+
+    def test_both_games_from_their_own_work_trees(self):
+        self.build('v143', 'botw160', 'botw190')
+        games = self.hub / 'Contents/Resources/games'
+        self.assertEqual(sorted(p.name for p in games.iterdir()), ['botw-v160', 'botw-v190', 'totk-v143'])
+        for ident, display, version, dlc in (('botw-v160', '1.6.0', 'botw160', []), ('botw-v190', '1.9.0', 'botw190', ['1'])):
+            game = games / ident
+            info = json.loads((game / 'game.json').read_text())
+            self.assertEqual(info, dict(game='botw', title='Breath of the Wild', version=display, launcher='launcher', root='totk',
+                                        icon='AppIcon.icns', shaders=dict(total=2, compiled=1),
+                                        status=f'BotW/shader-status-{version}.json', dlc=dlc))
+            self.assertEqual((game / 'launcher').read_bytes(), f'{version} build/app-launcher-{version}'.encode())
+            self.assertTrue((self.hub / f'Contents/Helpers/GameData-{version}.bundle').is_dir())
+        self.assertTrue((games / 'botw-v190/totk/extracted/botw190/aoc/1/romfs.bin').is_file())
 
     def test_same_version_is_replaced(self):
         self.build('v143')
@@ -101,7 +121,7 @@ class StepHub(unittest.TestCase):
         with patch.object(build_app, 'sign_app', side_effect=build_app.BuildError('seal rejected')), \
              patch.object(build_app, 'data_bundle', fake_data_bundle):
             with self.assertRaisesRegex(build_app.BuildError, 'seal rejected'):
-                build_app.step_hub(fake_tree(self.root, 'v143'), self.hub, self.logs, ['v143'])
+                build_app.step_hub(self.hub, self.logs, [(fake_tree(self.root, 'v143'), 'totk', 'v143')])
         self.assertEqual([p.name for p in (self.hub / 'Contents/Resources/games').iterdir()], ['totk-v0'])
 
     def test_hub_option_is_mac_only_and_not_with_out(self):
@@ -162,14 +182,14 @@ class GamesFolder(unittest.TestCase):
             raise build_app.BuildError('unsupported update module hashes')
         with patch.object(build_app, 'identify_base', side_effect=lambda _t, path, _k, _l: path.name in bases), \
              patch.object(build_app, 'identify_update', side_effect=identify_update), patch.object(build_app, 'say'):
-            base, updates = build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs')
-        self.assertEqual(base, self.folder / 'base.nsp')
-        self.assertEqual(updates, [('v0', None), ('v143', self.folder / 'u143.nsp')])
+            builds = build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs')
+        base = self.folder / 'base.nsp'
+        self.assertEqual(builds, [Build('totk', 'v0', base, None, ()), Build('totk', 'v143', base, self.folder / 'u143.nsp', ())])
         index = json.loads((self.root / 'support/library-files.json').read_text())
         self.assertEqual(index['folder'], str(self.folder))
         rows = {r['name']: r for r in index['files']}
         self.assertNotIn('notes.txt', rows)
-        self.assertEqual((rows['base.nsp']['kind'], rows['base.nsp']['version']), ('base', '1.0.0'))
+        self.assertEqual((rows['base.nsp']['kind'], rows['base.nsp']['version'], rows['base.nsp']['adds']), ('base', '1.0.0', ['1.0.0']))
         self.assertEqual(rows['copy-of-base.nsp']['kind'], 'unsupported')
         self.assertEqual((rows['u143.nsp']['kind'], rows['u143.nsp']['version'], rows['u143.nsp']['game']), ('update', '1.4.3', 'totk'))
         self.assertEqual(rows['u111.nsp']['note'], 'an update of a version this project does not support')
@@ -188,19 +208,85 @@ class GamesFolder(unittest.TestCase):
             with patch.object(build_app, 'identify_base', side_effect=lambda _t, path, _k, _l: path.name == 'base.nsp'), \
                  patch.object(build_app, 'identify_update', side_effect=identify_update), patch.object(build_app, 'say'):
                 return build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs', only=only)
-        self.assertEqual(scan('u143.nsp'), (self.folder / 'base.nsp', [('v143', self.folder / 'u143.nsp')]))
-        self.assertEqual(scan('base.nsp'), (self.folder / 'base.nsp', [('v0', None)]))
+        base = self.folder / 'base.nsp'
+        self.assertEqual(scan('u143.nsp'), [Build('totk', 'v143', base, self.folder / 'u143.nsp', ())])
+        self.assertEqual(scan('base.nsp'), [Build('totk', 'v0', base, None, ())])
         with self.assertRaisesRegex(build_app.BuildError, 'other.nsp: not a supported game file'):
             scan('other.nsp')
         with self.assertRaisesRegex(build_app.BuildError, 'no gone.nsp in'):
             scan('gone.nsp')
+
+    def botw_scan(self, only=None, card=True):
+        """A folder with both games' files and one of another game; tickets are named after their title IDs."""
+        tik = lambda title: f'{title}0000000000000010.tik'
+        self.nsp('totk.nsp', 'a.nca')
+        self.nsp('botw.nsp', tik('01007ef00011e000'))
+        self.nsp('botw-160.nsp', tik('01007ef00011e800'))
+        self.nsp('botw-190.nsz', tik('01007ef00011e800'))
+        self.nsp('dlc1.nsp', tik('01007ef00011f001'))
+        self.nsp('dlc2.nsp', tik('01007ef00011f002'))
+        self.nsp('dlc3.nsp', tik('01007ef00011f003'))
+        self.nsp('kart.nsp', tik('0100152000022000'))
+        if card:
+            (self.folder / 'card.xci').write_bytes(b'not a PFS0')
+        updates = {'botw-160.nsp': 'botw160', 'botw-190.nsz': 'botw190'}
+        botw = []
+        with patch.object(build_app, 'identify_base', side_effect=lambda _t, path, _k, _l: path.name == 'totk.nsp'), \
+             patch.object(build_app, 'identify_game', side_effect=lambda _t, path, _k, _l: 'botw'), \
+             patch.object(build_app, 'prepare_update_container', side_effect=lambda _t, path, _k, _l: path.with_suffix('.container')), \
+             patch.object(build_app, 'identify_botw_update', side_effect=lambda tree, path, _k, _l: updates[path.with_suffix(
+                 '.nsz' if path.stem.endswith('190') else '.nsp').name]), patch.object(build_app, 'say'):
+            builds = build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs',
+                                            only=only, botw=lambda: botw.append(1) or (self.root / 'botw-tree', self.root / 'botw-logs'))
+        self.assertLessEqual(len(botw), 1)   # Breath of the Wild's work tree is made once
+        rows = {r['name']: r for r in json.loads((self.root / 'support/library-files.json').read_text())['files']}
+        return builds, rows
+
+    def test_both_games_and_add_on_content(self):
+        builds, rows = self.botw_scan()
+        f = self.folder
+        dlc = (f / 'dlc1.nsp', f / 'dlc2.nsp')
+        self.assertEqual(builds, [Build('totk', 'v0', f / 'totk.nsp', None, ()), Build('botw', 'botw160', f / 'card.xci', None, ()),
+                                  Build('botw', 'botw190', f / 'botw.nsp', f / 'botw-190.container', dlc)])
+        self.assertEqual({n: (r['kind'], r.get('adds') or r.get('note')) for n, r in rows.items()}, {
+            'totk.nsp': ('base', ['1.0.0']), 'card.xci': ('base', ['1.6.0']), 'botw.nsp': ('base', ['1.9.0']),
+            'botw-160.nsp': ('unsupported', '1.6.0 comes from card.xci'), 'botw-190.nsz': ('update', ['1.9.0']),
+            'dlc1.nsp': ('dlc', ['1.9.0']), 'dlc2.nsp': ('dlc', ['1.9.0']),
+            'dlc3.nsp': ('unsupported', 'add-on content this project does not use'),
+            'kart.nsp': ('unsupported', 'not a game this project supports')})
+        self.assertEqual((rows['dlc2.nsp']['game'], rows['dlc2.nsp']['title'], rows['dlc2.nsp']['pack']), ('botw', 'Breath of the Wild', '2'))
+
+    def test_breath_of_the_wild_160_from_the_base_and_its_update(self):
+        builds, rows = self.botw_scan(card=False)
+        f = self.folder
+        self.assertIn(Build('botw', 'botw160', f / 'botw.nsp', f / 'botw-160.container', ()), builds)
+        self.assertEqual(rows['botw.nsp']['adds'], ['1.6.0', '1.9.0'])
+
+    def test_only_builds_what_the_file_is_part_of(self):
+        f = self.folder
+        self.assertEqual([b.version for b in self.botw_scan(only='botw.nsp', card=False)[0]], ['botw160', 'botw190'])
+        self.assertEqual([b.version for b in self.botw_scan(only='dlc2.nsp')[0]], ['botw190'])   # now with a card image
+        with self.assertRaisesRegex(build_app.BuildError, 'kart.nsp: not a game this project supports'):
+            self.botw_scan(only='kart.nsp')
+
+    def test_files_without_what_they_need(self):
+        self.nsp('botw-190.nsp', '01007ef00011e8000000000000000010.tik')
+        self.nsp('dlc1.nsp', '01007ef00011f0010000000000000010.tik')
+        with patch.object(build_app, 'prepare_update_container', side_effect=lambda _t, path, _k, _l: path), \
+             patch.object(build_app, 'identify_botw_update', return_value='botw190'), patch.object(build_app, 'say'), \
+             self.assertRaisesRegex(build_app.BuildError, 'no game to build'):
+            build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs',
+                                   botw=lambda: (self.root / 'botw-tree', self.root / 'botw-logs'))
+        rows = {r['name']: r for r in json.loads((self.root / 'support/library-files.json').read_text())['files']}
+        self.assertEqual(rows['botw-190.nsp']['note'], 'needs the Breath of the Wild base game')
+        self.assertEqual(rows['dlc1.nsp']['note'], 'needs Breath of the Wild 1.9.0 (the base game and the 1.9.0 update)')
 
     def test_only_needs_the_games_folder(self):
         with self.assertRaisesRegex(build_app.BuildError, '--library and --only'):
             build_app.main([str(self.folder / 'base.nsp'), '-k', str(self.folder / 'prod.keys'), '--hub', '--only', 'base.nsp'])
 
     def test_no_base_game_is_an_error(self):
-        with patch.object(build_app, 'say'), self.assertRaisesRegex(build_app.BuildError, 'no supported base game'):
+        with patch.object(build_app, 'say'), self.assertRaisesRegex(build_app.BuildError, 'no game to build'):
             build_app.scan_library(self.root / 'tree', self.folder, self.folder / 'prod.keys', self.root / 'logs')
 
     def test_folder_is_remembered_and_keys_are_needed(self):

@@ -45,7 +45,7 @@ For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains, plus xcodegen, CMake and N
 Optional: Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain) compiles the startup shaders into the
 app, so moving or rebuilding it does not repeat that work at launch.
 """
-import argparse, concurrent.futures, glob, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
+import argparse, collections, concurrent.futures, glob, hashlib, json, os, platform, shutil, struct, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -86,8 +86,9 @@ HUB_ID = 'org.macnativegames.hub'
 # build found in the folder, which the hub lists.
 SUPPORT = Path.home() / 'Library/Application Support/MacNativeGames'
 DEFAULT_LIBRARY = Path.home() / 'Games/MacNativeGames'
-UPDATE_TITLE = '0100f2c0115b6800'   # the update's title ID, in its ticket's file name inside an NSP
-HUB_GAME = 'totk'   # which game, in the hub: its versions share one card (game.json and library-files.json "game")
+# One version of a game in the hub: the base game, the update package (None: a base game or card image alone) and, for
+# Breath of the Wild 1.9.0, the add-on content NSPs
+HubBuild = collections.namedtuple('HubBuild', 'game version base update dlc')
 LSREGISTER = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 # Pinned upstream sources fetched at build time (repository, commit)
 SPIRV_CROSS = ('https://github.com/KhronosGroup/SPIRV-Cross.git', 'aa217aeb6c9f0ace7a0ab233b28807edf45eb165')
@@ -569,61 +570,161 @@ def identify_base(tree, game, keys, logs):
     return True
 
 
-def scan_library(tree, folder, keys, logs, only=None):
-    """Everything in the games folder, identified by verified code: the base game, each supported update, and the
-    rest with the reason it is not used. Writes library-files.json for the hub. Returns (base game, [(version,
-    update package)]): the base game ('v0', None) and every update, or only: the version of the file with that name
-    (the hub's Add button, one version per build)."""
+def package_titles(path):
+    """[(game or None, kind, title ID)] of an NSP or NSZ, by the title IDs its tickets are named after (title_kind, TITLES);
+    [] for a package without tickets and an XCI."""
+    out = []
+    for name in pfs0_names(path):
+        if name.lower().endswith('.tik') and len(name) >= 20:
+            try:
+                application, kind = title_kind(name[:16])
+            except ValueError:
+                continue
+            out.append((TITLES.get(application), kind, name[:16].upper()))
+    return out
+
+
+def scan_library(tree, folder, keys, logs, only=None, botw=None):
+    """Everything in the games folder, and the reason for each file that is not used. Tears of the Kingdom files and
+    Breath of the Wild updates are identified by their verified code; Breath of the Wild's base game and add-on content by
+    their tickets (their RomFS is verified when built). Writes library-files.json for the hub, where each file's "adds"
+    lists the hub versions it is part of. Returns the HubBuilds: Tears of the Kingdom 1.0.0 and each update; Breath of the
+    Wild 1.6.0 (a card image, else the base NSP with the 1.6.0 update) and 1.9.0 (the base game with the 1.9.0 update and
+    the add-on content found); with only, the builds the file of that name is part of (the hub's Add button). botw: () ->
+    (Breath of the Wild work tree, its logs), called once the folder has a Breath of the Wild update."""
     say(f'looking at the game files in {folder}')
-    base, updates, rows, versions = None, {}, [], {}   # versions: file name -> version
+    rows, totk_updates, botw_updates, packs, bases = [], {}, {}, {}, {}   # bases: 'totk', 'botw', 'card' -> path
+    pins = {pack['title_id']: index for index, pack in BOTW190['aoc'].items()}
+    botw_work = None
     for path in sorted(folder.iterdir()):
-        if not path.is_file() or path.suffix.lower() not in ('.xci', '.nsp', '.nsz', '.keys'):
+        suffix = path.suffix.lower()
+        if not path.is_file() or suffix not in ('.xci', '.nsp', '.nsz', '.keys'):
             continue
         stat = path.stat()
         row = dict(name=path.name, size=stat.st_size, mtime=stat.st_mtime)
         rows.append(row)
-        if path.suffix.lower() == '.keys':
+        if suffix == '.keys':
             row.update(kind='keys')
             continue
-        names = ' '.join(pfs0_names(path)).lower()
-        if UPDATE_TITLE not in names and path.suffix.lower() != '.nsz' and identify_base(tree, path, keys, logs):
-            row.update(kind='base', game=HUB_GAME, version=EXPECTED['display_version'])
-            if base:
-                row.update(kind='unsupported', note=f'{EXPECTED["display_version"]} again (already {base.name})')
+        tickets = [t for t in package_titles(path) if t[0]]
+        game, kind, title = tickets[0] if tickets else (None, None, None)
+        if package_titles(path) and not game:
+            row.update(kind='unsupported', note='not a game this project supports')
+        elif not game:   # an XCI or a package without tickets: by its code
+            if suffix != '.nsz' and identify_base(tree, path, keys, logs):
+                game, kind = 'totk', 'base'
+            elif suffix == '.xci':
+                try:   # Breath of the Wild's 1.6.0 card image; a Tears of the Kingdom one is only taken verified
+                    game, kind = ('botw', 'base') if identify_game(tree, path, keys, logs) == 'botw' else (None, None)
+                except BuildError:
+                    pass
             else:
-                base, versions[path.name] = path, 'v0'
-        elif path.suffix.lower() == '.xci':
+                game, kind = 'totk', 'update'   # identify_update says whether it is one
+            if not game:
+                row.update(kind='unsupported', note='not the supported base game')
+        elif game == 'totk' and kind == 'base' and not identify_base(tree, path, keys, logs):
             row.update(kind='unsupported', note='not the supported base game')
-        else:
+            game = None
+        if game:
+            row.update(game=game, title=APPS[game][0])
+        if game == 'totk' and kind == 'base':
+            row.update(kind='base', version=EXPECTED['display_version'], adds=[])
+            if 'totk' in bases:
+                row.update(kind='unsupported', note=f'{row["version"]} again (already {bases["totk"].name})')
+            else:
+                bases['totk'] = path
+        elif game == 'totk' and kind == 'update':
             try:
                 version, source = identify_update(tree, path, keys, logs)
             except BuildError as e:
                 row.update(kind='unsupported', note='an update of a version this project does not support'
-                           if UPDATE_TITLE in names else 'not a supported game file')
+                           if tickets else 'not a supported game file')
                 say(f'   skipped {path.name}: {str(e).splitlines()[0]}')
                 continue
-            row.update(kind='update', game=HUB_GAME, version=VERSIONS[version]['display_version'])
-            if version in updates:
-                row.update(kind='unsupported', note=f'{row["version"]} again (already {updates[version][0].name})')
+            row.update(kind='update', version=VERSIONS[version]['display_version'], adds=[])
+            if version in totk_updates:
+                row.update(kind='unsupported', note=f'{row["version"]} again (already {totk_updates[version][0].name})')
             else:
-                updates[version], versions[path.name] = (path, source), version
-        say(f'   {path.name}: {row.get("version") or row.get("note") or row["kind"]}')
+                totk_updates[version] = (path, source)
+        elif game == 'botw' and kind == 'base':
+            card = suffix == '.xci'   # a card image holds the 1.6.0 update and the add-on content too
+            row.update(kind='base', version=BOTW160['display_version'] if card else '1.0.0', adds=[])
+            which = 'card' if card else 'botw'
+            if which in bases:
+                row.update(kind='unsupported', note=f'{row["version"]} again (already {bases[which].name})')
+            else:
+                bases[which] = path
+        elif game == 'botw' and kind == 'update':
+            botw_work = botw_work or botw()
+            try:
+                source = prepare_update_container(botw_work[0], path, keys, botw_work[1])
+                version = identify_botw_update(botw_work[0], source, keys, botw_work[1])
+            except BuildError as e:
+                row.update(kind='unsupported', note='an update of a version this project does not support')
+                say(f'   skipped {path.name}: {str(e).splitlines()[0]}')
+                continue
+            row.update(kind='update', version=VERSIONS[version]['display_version'], adds=[])
+            if version in botw_updates:
+                row.update(kind='unsupported', note=f'{row["version"]} again (already {botw_updates[version][0].name})')
+            else:
+                botw_updates[version] = (path, source)
+        elif game == 'botw' and kind == 'dlc':
+            if title not in pins:
+                row.update(kind='unsupported', note='add-on content this project does not use')
+            else:
+                row.update(kind='dlc', version=BOTW190['display_version'], pack=pins[title], adds=[])
+                if title in packs:
+                    row.update(kind='unsupported', note=f'add-on content {pins[title]} again (already {packs[title].name})')
+                else:
+                    packs[title] = path
+        elif game:
+            row.update(kind='unsupported', note=f'{APPS[game][0]} {kind} content, which this project does not use')
+        say(f'   {path.name}: {row.get("note") or " ".join(filter(None, (row.get("title"), row.get("version"), row["kind"])))}')
+    builds = {}   # HubBuild -> the files it is built from
+    if 'totk' in bases:
+        builds[HubBuild('totk', 'v0', bases['totk'], None, ())] = [bases['totk']]
+        for v in UPDATES:
+            if v in totk_updates:
+                builds[HubBuild('totk', v, bases['totk'], totk_updates[v][1], ())] = [totk_updates[v][0]]
+    if 'card' in bases:
+        builds[HubBuild('botw', 'botw160', bases['card'], None, ())] = [bases['card']]
+    elif 'botw' in bases and 'botw160' in botw_updates:
+        builds[HubBuild('botw', 'botw160', bases['botw'], botw_updates['botw160'][1], ())] = [bases['botw'], botw_updates['botw160'][0]]
+    base = bases.get('botw') or bases.get('card')
+    if base and 'botw190' in botw_updates:
+        dlc = tuple(packs[t] for t in sorted(packs))
+        builds[HubBuild('botw', 'botw190', base, botw_updates['botw190'][1], dlc)] = [base, botw_updates['botw190'][0], *dlc]
+    by_name = {r['name']: r for r in rows}
+    for build, files in builds.items():
+        for path in files:
+            by_name[path.name]['adds'].append(VERSIONS[build.version]['display_version'])
+    for row in rows:   # identified, but nothing to build it into
+        if row['kind'] in ('base', 'update', 'dlc') and not row['adds']:
+            needs = {('totk', 'update'): 'the Tears of the Kingdom base game',
+                     ('botw', 'base'): 'the Breath of the Wild 1.6.0 or 1.9.0 update',
+                     ('botw', 'update'): 'the Breath of the Wild base game' if row['version'] == '1.9.0' or 'card' not in bases
+                                         else None,
+                     ('botw', 'dlc'): 'Breath of the Wild 1.9.0 (the base game and the 1.9.0 update)'}.get((row['game'], row['kind']))
+            row.update(kind='unsupported', note=f'needs {needs}' if needs else f'{row["version"]} comes from {bases["card"].name}')
+        if row['kind'] == 'unsupported':
+            row.pop('adds', None)
     write_json(SUPPORT / 'library-files.json', dict(folder=str(folder), files=rows))
-    if not base:
-        raise BuildError(f'no supported base game (TOTK 1.0.0, XCI or NSP) in {folder}; put it there with its updates and prod.keys')
-    builds = [('v0', None)] + [(v, updates[v][1]) for v in UPDATES if v in updates]
+    if not builds:
+        raise BuildError(f'no game to build in {folder}: put the base game there (Tears of the Kingdom 1.0.0, or Breath of '
+                         f'the Wild) with its updates and prod.keys')
     if only is not None:
-        if only not in versions:
-            row = next((r for r in rows if r['name'] == only), None)
+        chosen = [b for b, files in builds.items() if any(p.name == only for p in files)]
+        if not chosen:
+            row = by_name.get(only)
             raise BuildError(f'{only}: ' + (row.get('note') or 'not a game file') if row else f'no {only} in {folder}')
-        builds = [b for b in builds if b[0] == versions[only]]
-    return base, builds
+        return chosen
+    return list(builds)
 
 
-def library_fonts(folder, work):
-    """Fonts from the games folder when the work folder has none yet: a folder holding the six .bfttf files, or a
+def library_fonts(folder, *works):
+    """Fonts from the games folder when no work folder has them yet: a folder holding the six .bfttf files, or a
     firmware folder."""
-    if fonts_valid(work / 'totk/extracted/firmware/shared-fonts'):
+    if any(fonts_valid(work / 'totk/extracted/firmware/shared-fonts') for work in works):
         return None, None
     subs = sorted(p for p in folder.iterdir() if p.is_dir())
     fonts = next((p for p in subs if fonts_valid(p)), None)
@@ -1583,44 +1684,47 @@ def step_app(tree, out, logs, *, version="v0", game='totk'):
         say('4/4 app: the game data is unchanged; kept the installed copy, so the first start need not verify it again')
 
 
-def hub_game_id(version):
-    return f'totk-{version}'
+def hub_game_id(game, version):
+    """The game's folder in the hub, which MNG_GAME names (hub/hub.m): totk-v143, botw-v190."""
+    return f'botw-v{version[4:]}' if game == 'botw' else f'{game}-{version}'
 
 
-def step_hub(tree, hub, logs, versions):
-    """Add these versions of the game to the hub app (hub/hub.m), or replace the same game and version in it; the
-    hub's other games stay. Each game is Contents/Resources/games/<id>: game.json (what the hub shows), the game's own
-    launcher (build/app-launcher-<version>, step_binary), its icon and its files in totk/, as a single-game app has them.
-    The hub is assembled next to the old one (APFS clones: the games already in it take no extra space) and replaces it
-    only once sealed."""
+def step_hub(hub, logs, games):
+    """Add these games to the hub app (hub/hub.m), each (work tree, 'totk' or 'botw', version), or replace the same game
+    and version in it; the hub's other games stay. Each game is Contents/Resources/games/<id>: game.json (what the hub
+    shows), the game's own launcher (build/app-launcher-<version>, step_binary), its icon and its files in totk/, as a
+    single-game app has them. The hub is assembled next to the old one (APFS clones: the games already in it take no extra
+    space) and replaces it only once sealed."""
     tmp = hub.with_name(hub.name + '.partial')
     if tmp.exists():
         shutil.rmtree(tmp)
     if hub.exists() and subprocess.run(['cp', '-cR', hub, tmp], capture_output=True).returncode:
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.copytree(hub, tmp, symlinks=True)
-    for version in versions:
-        game = tmp / 'Contents/Resources/games' / hub_game_id(version)
+    for tree, key, version in games:
+        game = tmp / 'Contents/Resources/games' / hub_game_id(key, version)
         for old in (game, tmp / f'Contents/Helpers/GameData-{version}.bundle'):
             if old.exists():
                 remove_tree(old)
-        total, compiled = game_resources(tree, tmp, game / 'totk', version, logs)
+        total, compiled = game_resources(tree, tmp, game / 'totk', version, logs, key)
         clone(tree / f'build/app-launcher-{version}', game / 'launcher')
         icon = tree / 'build/AppIcon.icns'
         if icon.exists():
             clone(icon, game / 'AppIcon.icns')
         # status: written by the game while it warms its shaders (app/launcher.m TOTK_SHADER_STATUS), relative to
-        # ~/Library/Application Support/MacNativeGames
-        (game / 'game.json').write_text(json.dumps(dict(
-            game=HUB_GAME, title=APP_NAME, version=VERSIONS[version]['display_version'], launcher='launcher', root='totk',
-            icon='AppIcon.icns' if icon.exists() else None, shaders=dict(total=total, compiled=compiled),
-            status=f'TOTK/shader-status-{version}.json'), indent=1) + '\n')
-    clone(tree / 'build/hub', tmp / f'Contents/MacOS/{HUB_NAME}')
+        # ~/Library/Application Support/MacNativeGames; dlc: the add-on content packs in it (game_resources)
+        info = dict(game=key, title=APPS[key][0], version=VERSIONS[version]['display_version'], launcher='launcher', root='totk',
+                    icon='AppIcon.icns' if icon.exists() else None, shaders=dict(total=total, compiled=compiled),
+                    status=f'{APPS[key][2]}/shader-status-{version}.json')
+        if 'aoc' in VERSIONS[version]:
+            info['dlc'] = sorted(i for i in VERSIONS[version]['aoc'] if (game / f'totk/extracted/{version}/aoc/{i}/romfs.bin').exists())
+        (game / 'game.json').write_text(json.dumps(info, indent=1) + '\n')
+    clone(games[0][0] / 'build/hub', tmp / f'Contents/MacOS/{HUB_NAME}')   # step_binary builds it in every work tree
     info = dict(CFBundleDevelopmentRegion='en', CFBundleExecutable=HUB_NAME, CFBundleIdentifier=HUB_ID, CFBundleName=HUB_NAME,
                 CFBundleDisplayName=HUB_NAME, CFBundlePackageType='APPL', CFBundleShortVersionString='1.0', CFBundleVersion='1',
                 LSMinimumSystemVersion='26.0', NSHighResolutionCapable=True,
                 LSApplicationCategoryType='public.app-category.games', LSSupportsGameMode=True,
-                GCSupportsControllerUserInteraction=True)
+                GCSupportsControllerUserInteraction=True, MNGContributionFolder=str(contrib_folder()))   # as step_app
     import plistlib
     (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     (tmp / 'Contents/PkgInfo').write_bytes(b'APPL????')
@@ -2005,6 +2109,65 @@ def step_shaders_botw(tree, botw, logs, *, version='botw160'):
         logs / 'prepare-shader-seed-botw.log', cwd=tree)
 
 
+def botw_build(tree, game, kind, update, dlcs, keys, logs):
+    """The Breath of the Wild version the files named on the command line make: a card image alone is 1.6.0, a base game
+    with an update the update's version (identify_botw_update, by its verified code); --dlc only with 1.9.0."""
+    check_package(game, 'botw', 'base')
+    if update:
+        check_package(update, 'botw', 'update')
+    elif kind != 'xci':
+        raise BuildError('Breath of the Wild from a base NSP needs the 1.9.0 update (or the 1.6.0 update): pass it with '
+                         '--update <update.nsp> (a card image already holds its 1.6.0 update)')
+    check_dlc(dlcs, BOTW190)   # the files first; the packs are the same for both versions
+    if update:   # the base game (NSP or XCI) with the separate 1.6.0 or 1.9.0 update
+        update = prepare_update_container(tree, update, keys, logs)
+        version = identify_botw_update(tree, update, keys, logs)
+    else:   # a combined card image: base, 1.6.0 update and add-on content
+        version = 'botw160'
+    if dlcs and version != 'botw190':
+        raise BuildError('--dlc takes the add-on content of Breath of the Wild 1.9.0; a 1.6.0 build takes it from a card image only, so leave out --dlc')
+    return HubBuild('botw', version, game, update, tuple(dlcs))
+
+
+def step_botw(tree, build, keys, env, logs, *, firmware=None, shared_fonts=None):
+    """Steps 1 to 4 of one Breath of the Wild version (a HubBuild), up to the game binary and its launcher."""
+    botw, version = tree.parent / 'botw', build.version
+    step_code_botw(tree, botw, build.update or build.base, keys, env, logs, version=version)
+    step_data_botw(tree, botw, build.base, keys, logs, version=version, update=build.update, dlc=list(build.dlc), firmware=firmware,
+                   shared_fonts=shared_fonts)
+    step_shaders_botw(tree, botw, logs, version=version)
+    step_shader_libs(tree, logs, version=version)
+    # The work folder's copy of games/botw (prepare_work), relative: make splits a path with spaces into several targets
+    step_binary(tree, build.base, keys, {**env, 'SHADER_LIST': '../botw/assets/shader_list.tsv'}, logs, version=version,
+                title='01007ef00011e000')
+
+
+def check_app(out, executable, logs):
+    """macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): register it and run it
+    once here, in its check-only mode, so the player's first start is immediate."""
+    run([LSREGISTER, '-f', out], logs / 'register-app.log')   # its version, executable and signing identity, before Finder starts it
+    say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
+    t1 = time.time()
+    r = subprocess.run([out / f'Contents/MacOS/{executable}', '--check'], capture_output=True, text=True, timeout=1800)
+    if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
+    say(f'   checked in {time.time() - t1:.0f} s')
+
+
+def finish_hub(out, logs, games, **works):
+    """The hub with these games (step_hub, each (work tree, game, version)); in library.json "builder", how the hub's Add
+    buttons run this script again (the same Python and Xcode, and works: the work folder of each game built, work for
+    Tears of the Kingdom, botw_work for Breath of the Wild); then macOS's first check and each game's Metal cache."""
+    step_hub(out, logs, games)
+    settings = library_settings()
+    builder = settings['builder'] if isinstance(settings.get('builder'), dict) else {}
+    save_library_settings(hub=str(out), builder={**builder, **{k: str(v) for k, v in works.items()},
+                                                 'python': sys.executable, 'script': str(Path(__file__).resolve()),
+                                                 'developer_dir': os.environ.get('DEVELOPER_DIR', '')})
+    check_app(out, HUB_NAME, logs)
+    for tree, game, version in games:
+        step_warm_metal(tree, out, logs, build=out / f'Contents/Resources/games/{hub_game_id(game, version)}/totk/build')
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(description='Build a native Mac app or unsigned iPhone/iPad IPA from TOTK base 1.0.0 (XCI/NSP), optionally with the separate 1.1.2, 1.2.1 or 1.4.3 update; or a Mac app from Breath of the Wild: a combined 1.6.0 card image, a base game with the separate 1.6.0 update, or a base NSP with its 1.9.0 update NSP and optional add-on content NSPs (--dlc).',
                                  epilog='example: python3 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys')
@@ -2022,8 +2185,8 @@ def parse_args(argv):
                     help=f'with --hub and no game file: your games folder, remembered for next time and shown in the hub '
                          f'(default: the last one, else {DEFAULT_LIBRARY})')
     ap.add_argument('--only', metavar='FILE',
-                    help='with --hub and no game file: add only the version of this file in the games folder (its name), '
-                         'as the hub\'s Add button does; the hub\'s other versions stay')
+                    help='with --hub and no game file: add only the versions this file in the games folder (its name) is '
+                         'part of, as the hub\'s Add button does; the hub\'s other versions stay')
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--hub', type=Path, nargs='?', const=True, metavar='HUB.app',
                     help=f'add the game to the hub app ({HUB_NAME}.app next to the game file unless named), which shows every '
@@ -2032,7 +2195,8 @@ def parse_args(argv):
                     help='with --hub: also add every supported update found next to the game file (or in --updates-dir); '
                          'each file is identified by its verified code, unsupported ones are skipped')
     ap.add_argument('--updates-dir', type=Path, help='with --all-versions: the folder to look for updates in')
-    ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
+    ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file; with --hub and no game '
+                    'file, Breath of the Wild builds in BotW_build next to it)')
     ap.add_argument('--mod', type=Path, metavar='FOLDER',
                     help='a mod folder prepared before the build: its exefs/ IPS / IPS32 / pchtxt patches for the main '
                          'module are merged into the code before it is rewritten (its romfs/ goes in with '
@@ -2050,10 +2214,20 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+_botw_trees = {}
+
+
+def botw_tree(work, args):
+    """Breath of the Wild's work tree in a hub build from the games folder, prepared once."""
+    if work not in _botw_trees:
+        _botw_trees[work] = prepare_work(work, prerequisites(args), work / 'logs')
+    return _botw_trees[work]
+
+
 def main(argv):
     args = parse_args(argv)
     device_app = args.platform in ('ios', 'visionos')
-    library = library_builds = None
+    library = library_builds = botw_work = None
     if args.game is None:
         if not args.hub:
             raise BuildError('name the game file, or add --hub to build everything in your games folder into the hub app')
@@ -2067,15 +2241,19 @@ def main(argv):
         if args.hub is True:
             args.hub = Path(settings['hub']) if settings.get('hub') else Path.home() / f'Applications/{HUB_NAME}.app'
         builder = settings.get('builder') if isinstance(settings.get('builder'), dict) else {}
-        args.work = args.work or (Path(builder['work']) if builder.get('work') else library / 'TOTK_build')
+        given_work, args.work = args.work, args.work or (Path(builder['work']) if builder.get('work') else library / 'TOTK_build')
+        work = args.work.expanduser().resolve()
+        # Breath of the Wild builds in a work folder of its own (the games' builds share file names such as build/app-launcher)
+        botw_work = Path(builder['botw_work']) if builder.get('botw_work') and not given_work else work.with_name('BotW_build')
         args.keys = args.keys or library / 'prod.keys'
         if not args.keys.expanduser().is_file():
             raise BuildError(f'no prod.keys in {library}: put your keys there (or name them with -k)')
         if not (args.firmware or args.shared_fonts):
-            args.firmware, args.shared_fonts = library_fonts(library, args.work.expanduser().resolve())
-        work = args.work.expanduser().resolve()
+            args.firmware, args.shared_fonts = library_fonts(library, work, botw_work)
         tree = prepare_work(work, prerequisites(args), work / 'logs')
-        args.game, library_builds = scan_library(tree, library, args.keys.expanduser().resolve(), work / 'logs', only=args.only)
+        library_builds = scan_library(tree, library, args.keys.expanduser().resolve(), work / 'logs', only=args.only,
+                                      botw=lambda: (botw_tree(botw_work, args), botw_work / 'logs'))
+        args.game = next((b.base for b in library_builds if b.game == 'totk'), library_builds[0].base)   # Tears of the Kingdom first
     elif args.library or args.only:
         raise BuildError('--library and --only are for a hub build from the games folder, without a game file')
     game, keys = args.game.expanduser().resolve(), args.keys.expanduser().resolve() if args.keys else None
@@ -2093,8 +2271,8 @@ def main(argv):
         raise BuildError('--all-versions finds the updates itself: leave out --update')
     if args.updates_dir and not args.all_versions:
         raise BuildError('--updates-dir is where --all-versions looks: add --all-versions')
-    if args.hub and (args.mod or args.dlc):
-        raise BuildError('--hub takes the game and its updates as they are: build an app of its own for --mod or --dlc')
+    if args.hub and args.mod:
+        raise BuildError('--hub takes the game and its updates as they are: build an app of its own for --mod')
     if args.hub:
         out = game.parent / f'{HUB_NAME}.app' if args.hub is True else args.hub.expanduser().resolve()
     else:
@@ -2135,7 +2313,8 @@ def main(argv):
         font_report(shared_fonts)
     no_fonts = BuildError('NSP files do not include system shared fonts. Supply --firmware <unpacked firmware NCA directory> '
                           'or --shared-fonts <previously extracted font directory>; valid fonts in --work are also reused.')
-    fonts_given = firmware or shared_fonts or fonts_valid(work / 'totk/extracted/firmware/shared-fonts')
+    fonts_given = firmware or shared_fonts or fonts_valid(work / 'totk/extracted/firmware/shared-fonts') or \
+        (botw_work and fonts_valid(botw_work / 'totk/extracted/firmware/shared-fonts'))
     if kind == 'nsp' and not (fonts_given or (not args.work and fonts_valid(game.parent / 'BotW_build/totk/extracted/firmware/shared-fonts'))):   # Breath of the Wild's default work folder
         raise no_fonts
     py = prerequisites(args)
@@ -2157,49 +2336,35 @@ def main(argv):
     if which == 'botw':
         if args.platform == 'visionos':
             raise BuildError('Breath of the Wild has no native Vision Pro build yet: use --platform macos or ios')
-        if args.hub:
-            raise BuildError('Breath of the Wild is not in the hub yet: build its own app (leave out --hub)')
         if fresh_work and not args.work:   # BotW_build next to the game file, not TOTK_build
             shutil.rmtree(work)
         if mod:
             raise BuildError('--mod: merging a mod\'s main-module patches is only wired for Tears of the Kingdom so far '
                              '(the patch sites of Breath of the Wild 1.6.0 are not listed in scripts/patch_sites.py)')
-        if not args.work:
-            work = game.parent / 'BotW_build'
+        if library_builds is not None:   # the games folder's Breath of the Wild versions, identified by scan_library
+            work = botw_work
             logs = work / 'logs'
-            tree = prepare_work(work, py, logs)
-        if not args.out:
-            out = game.parent / f'{APPS["botw"][0]}.{"ipa" if args.platform == "ios" else "app"}'
-        check_package(game, 'botw', 'base')
-        if update:
-            check_package(update, 'botw', 'update')
-        elif kind != 'xci':
-            raise BuildError('Breath of the Wild from a base NSP needs the 1.9.0 update (or the 1.6.0 update): pass it with '
-                             '--update <update.nsp> (a card image already holds its 1.6.0 update)')
-        check_dlc(dlcs, BOTW190)   # the files first; the packs are the same for both versions
-        if update:   # the base game (NSP or XCI) with the separate 1.6.0 or 1.9.0 update
-            update = prepare_update_container(tree, update, keys, logs)
-            version = identify_botw_update(tree, update, keys, logs)
-        else:   # a combined card image: base, 1.6.0 update and add-on content
-            version = 'botw160'
-        if dlcs and version != 'botw190':
-            raise BuildError('--dlc takes the add-on content of Breath of the Wild 1.9.0; a 1.6.0 build takes it from a card image only, so leave out --dlc')
-        expected = VERSIONS[version]
-        if shutil.disk_usage(existing_volume_path(work.parent if work.parent.exists() else game.parent)).free / 2**30 < 22 and \
-                not (work / f'totk/extracted/{version}/romfs/romfs.bin').exists():
-            raise BuildError('needs about 22 GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
+            tree = botw_tree(work, args)
+            builds = [b for b in library_builds if b.game == 'botw']
+        else:
+            if not args.work:
+                work = game.parent / 'BotW_build'
+                logs = work / 'logs'
+                tree = prepare_work(work, py, logs)
+            if not args.out and not args.hub:
+                out = game.parent / f'{APPS["botw"][0]}.{"ipa" if args.platform == "ios" else "app"}'
+            builds = [botw_build(tree, game, kind, update, dlcs, keys, logs)]
+        new = [b.version for b in builds if not (work / f'totk/extracted/{b.version}/romfs/romfs.bin').exists()]
+        if shutil.disk_usage(existing_volume_path(work.parent if work.parent.exists() else game.parent)).free / 2**30 < 22 * len(new):
+            raise BuildError(f'needs about {22 * len(new)} GB free for the work folder (the app itself is an APFS clone of it when on the same volume)')
         if args.shader_cache:
             say('--shader-cache is no longer needed: the startup shaders come from the game data and the shared shader list (games/botw/assets/shader_list.tsv)')
-        botw = work / 'botw'
-        say(f'Breath of the Wild {expected["display_version"]}; work folder {work}')
-        step_code_botw(tree, botw, update or game, keys, env, logs, version=version)
-        step_data_botw(tree, botw, game, keys, logs, version=version, update=update, dlc=dlcs, firmware=firmware, shared_fonts=shared_fonts)
-        step_shaders_botw(tree, botw, logs, version=version)
-        step_shader_libs(tree, logs, version=version)
-        # The work folder's copy of games/botw (prepare_work), relative: make splits a path with spaces into several targets
-        step_binary(tree, game, keys, {**env, 'SHADER_LIST': '../botw/assets/shader_list.tsv'}, logs, version=version, title='01007ef00011e000')
+        for b in builds:
+            say(f'Breath of the Wild {VERSIONS[b.version]["display_version"]}; work folder {work}')
+            step_botw(tree, b, keys, env, logs, firmware=firmware, shared_fonts=shared_fonts)
         say(f'4/4 app: assembling {out}')
         if device_app:   # the same IPA tooling as Tears of the Kingdom (ios/tools/build_ipa.py --version botw160 / botw190)
+            version = builds[0].version
             run([py, 'ios/tools/build_ipa.py', '--tree', tree, '--out', out, '--version', version,
                  '--logs', logs, '--app-name', APPS['botw'][2], '--bundle-id', APPS['botw'][1],
                  *(['--image-outside'] if args.ios_game_data == 'documents' else [])], logs / 'build-ipa.log', cwd=tree, env=env)
@@ -2207,14 +2372,12 @@ def main(argv):
             say('Install it with games/totk/ios/tools/install_device.py' + (f' --game-data {tree}/extracted/{version}/romfs/romfs.bin'
                 if args.ios_game_data == 'documents' else '') + '; saves and the shader cache stay in the app\'s Documents.')
             return
-        step_app(tree, out, logs, version=version, game='botw')
-        run([LSREGISTER, '-f', out], logs / 'register-app.log')
-        say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
-        t1 = time.time()
-        r = subprocess.run([out / f'Contents/MacOS/{APPS["botw"][2]}', '--check'], capture_output=True, text=True, timeout=1800)
-        if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
-        say(f'   checked in {time.time() - t1:.0f} s')
-        step_warm_metal(tree, out, logs)
+        if args.hub:
+            finish_hub(out, logs, [(tree, 'botw', b.version) for b in builds], botw_work=work)
+        else:
+            step_app(tree, out, logs, version=builds[0].version, game='botw')
+            check_app(out, APPS['botw'][2], logs)
+            step_warm_metal(tree, out, logs)
         say(f'done in {(time.time() - t0) / 60:.0f} min: {out}')
         say('Open it from Finder. The first start verifies the game data and any installed add-on content and keeps a record; '
             'saves, the shader cache and the log go to ~/Library/Application Support/MacNativeGames/BotW and ~/Library/Logs/MacNativeGames/botw.log.')
@@ -2251,7 +2414,7 @@ def main(argv):
         builds = [identify_update(tree, update, keys, logs)]
     elif args.all_versions or library_builds is not None:
         if library_builds is not None:
-            builds = library_builds
+            builds = [(b.version, b.update) for b in library_builds if b.game == 'totk']
         else:
             folder = args.updates_dir.expanduser().resolve() if args.updates_dir else game.parent
             builds += find_updates(tree, folder, game, keys, logs)
@@ -2272,6 +2435,19 @@ def main(argv):
         step_shaders(tree, logs, version=version)
         step_shader_libs(tree, logs, version=version)
         step_binary(tree, game, keys, env, logs, version=version)
+    hub_games = [(tree, 'totk', v) for v, _ in builds]
+    botw_builds = [b for b in library_builds or () if b.game == 'botw']
+    if botw_builds:   # the games folder's Breath of the Wild versions, in their own work folder
+        botw, botw_logs = botw_tree(botw_work, args), botw_work / 'logs'
+        new = [b.version for b in botw_builds if not (botw / f'extracted/{b.version}/romfs/romfs.bin').exists()]
+        if shutil.disk_usage(existing_volume_path(botw_work)).free / 2**30 < 22 * len(new):
+            raise BuildError(f'Breath of the Wild needs about {22 * len(new)} GB free for its work folder {botw_work}')
+        fonts = tree / 'extracted/firmware/shared-fonts'   # Tears of the Kingdom's, checked by step_data
+        for b in botw_builds:
+            say(f'Breath of the Wild {VERSIONS[b.version]["display_version"]}; work folder {botw_work}')
+            step_botw(botw, b, keys, env, botw_logs, firmware=firmware,
+                      shared_fonts=shared_fonts or (fonts if fonts_valid(fonts) else None))
+        hub_games += [(botw, 'botw', b.version) for b in botw_builds]
     say(f'4/4 app: assembling {out}')
     if device_app:
         run([py, 'ios/tools/build_ipa.py', '--tree', tree, '--out', out, '--version', version,
@@ -2288,26 +2464,12 @@ def main(argv):
             except BuildError as e:
                 say(f'   the Mac reminder for iPhone / iPad shader contributions was not installed: {e}')
     elif args.hub:
-        step_hub(tree, out, logs, [v for v, _ in builds])
-        # How the hub's Add buttons run this script again: the same Python, work folder and Xcode
-        save_library_settings(hub=str(out), builder=dict(
-            python=sys.executable, script=str(Path(__file__).resolve()), work=str(work),
-            developer_dir=os.environ.get('DEVELOPER_DIR', '')))
+        finish_hub(out, logs, hub_games, work=work, **({'botw_work': botw_work} if botw_builds else {}))
     else:
         step_app(tree, out, logs, version=version)
-    # Refresh an existing app's version, executable and signing identity before
-    # the next Finder launch; the desktop alias keeps pointing to this bundle.
-    if args.platform=='macos': run([LSREGISTER, '-f', out], logs / 'register-app.log')
-    # macOS scans a new app the first time it runs (minutes for 16 GB, with nothing on screen): run it once here, in its
-    # check-only mode, so the player's first start is immediate.
+        check_app(out, APPS['totk'][2], logs)
+        step_warm_metal(tree, out, logs)
     if args.platform=='macos':
-        say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
-        t1 = time.time()
-        r = subprocess.run([out / f'Contents/MacOS/{HUB_NAME if args.hub else "TOTK"}', '--check'], capture_output=True, text=True, timeout=1800)
-        if r.returncode: raise BuildError(f'the app does not start: {(r.stdout + r.stderr).strip()}')
-        say(f'   checked in {time.time() - t1:.0f} s')
-        for v, _ in builds:
-            step_warm_metal(tree, out, logs, build=out / f'Contents/Resources/games/{hub_game_id(v)}/totk/build' if args.hub else None)
         if mod and args.install_mod_romfs:
             install_mod_romfs(mod, tree, version, out, py, logs)   # --install-mod-romfs: <data>/mods/<version> + its manifest
         elif mod:
