@@ -21,6 +21,14 @@
 #include "include/totk_ui_lang.h"
 #include "totk_shader_contrib.h"   // the shared shader list contribution and its reminder
 
+/* The player's settings for this game (TOTK_DEBUG_LOG, a per-app AppleLanguages) are read from the game's own domain, the
+   bundle identifier of its single-game app (build_app.py APPS), also when the hub app (org.macnativegames.hub) runs it. */
+#ifdef GAME_BOTW
+#define GAME_DEFAULTS CFSTR("org.macnativegames.botw")
+#else
+#define GAME_DEFAULTS CFSTR("org.macnativegames.totk")
+#endif
+
 static void show_error(NSString *detail) {
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"The game could not start";
@@ -259,9 +267,11 @@ int main(int argc, char **argv) {
         setenv("TOTK_SHARED_FONTS", "extracted/firmware/shared-fonts", 1);
         /* Player mods (runtime/romfs.c): <data>/mods/<version>/manifest.tsv, when present. */
         setenv("TOTK_ROMFS_MODS", [data stringByAppendingPathComponent:@"mods/" TOTK_GAME_DIR].fileSystemRepresentation, 0);
-        /* The game's language (runtime/services.c): the app's first preferred language, which also follows a per-app
+        /* The game's language (runtime/services.c): the game's first preferred language, which also follows a per-app
            language (defaults write org.macnativegames.totk AppleLanguages -array pt-BR). TOTK_LANG still overrides it. */
-        NSString *preferred = NSLocale.preferredLanguages.firstObject;
+        NSArray *languages = CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("AppleLanguages"), GAME_DEFAULTS));   // else the Mac's
+        NSString *preferred = [languages isKindOfClass:NSArray.class] && [languages.firstObject isKindOfClass:NSString.class]
+                            ? languages.firstObject : NSLocale.preferredLanguages.firstObject;
         if (preferred) setenv("TOTK_LOCALE", preferred.UTF8String, 1);
         setenv("TOTK_GPU_ALLOW_SUBMIT", "1", 1);
         setenv("TOTK_GPU_WIDEN", "1", 1);
@@ -289,7 +299,7 @@ int main(int argc, char **argv) {
            -bool YES (org.macnativegames.botw for Breath of the Wild), or TOTK_DEBUG_LOG=1 in the environment, which wins
            (the test tools pass it). Off, the game's output goes to /dev/null and the logs of earlier runs are removed. */
         const char *debugEnv = getenv("TOTK_DEBUG_LOG");
-        BOOL debugLog = debugEnv ? (*debugEnv && strcmp(debugEnv, "0")) : [NSUserDefaults.standardUserDefaults boolForKey:@"TOTK_DEBUG_LOG"];
+        BOOL debugLog = debugEnv ? (*debugEnv && strcmp(debugEnv, "0")) : CFPreferencesGetAppBooleanValue(CFSTR("TOTK_DEBUG_LOG"), GAME_DEFAULTS, NULL);
         NSString *log = [logs stringByAppendingPathComponent:@GAME_LOG ".log"];
         NSString *previous = [logs stringByAppendingPathComponent:@GAME_LOG ".previous.log"];
         [NSFileManager.defaultManager removeItemAtPath:previous error:nil];
