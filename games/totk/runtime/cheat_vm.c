@@ -6,7 +6,8 @@
 /* Encodings follow Atmosphère's dmnt cheat VM (stratosphere/dmnt/source/cheat/impl/dmnt_cheat_vm.cpp). Nibbles are
    numbered from the most significant: in "5TMRI0AA" nibble 1 is T (width), 2 M (memory type), 3 R (register)...
    One addition: the saved values (C1 / C2) can outlive a run (CheatEnv.saved; runtime/cheats.c keeps them per cheat
-   while it stays on), so a cheat can compare with what it saw on its last tick. Atmosphère clears them on every run. */
+   while it stays on), so a cheat can compare with what it saw on its last tick. Atmosphère clears them on every run.
+   When a cheat is turned off it runs once more with saved value 15 = 1, so one that sets a game flag can clear it. */
 #define NIB(x, i) (((x) >> (28 - 4 * (i))) & 0xF)
 
 static int set_err(char *err, size_t errn, const char *fmt, unsigned a, uint32_t b) {

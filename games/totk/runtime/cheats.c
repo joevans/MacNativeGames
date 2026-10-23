@@ -42,6 +42,7 @@ static int ncheat, listed[CHEAT_MAX], nlisted;
 static _Atomic int state[CHEAT_MAX];
 static char problem[CHEAT_MAX][112];
 static uint64_t saved[CHEAT_MAX][16];   // each cheat's saved values (C1 / C2) from its last tick; cleared when it is turned on
+static _Atomic int closing[CHEAT_MAX];  // just turned off: run once more with saved value 15 = 1, so it can undo what it set
 static uint8_t *main_base;
 static uint64_t main_size, main_rx, main_text, main_patch;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -192,7 +193,9 @@ static void *cheat_thread(void *arg) {
         env.keys = runtime_input_buttons();
         for (int k = 0; k < ncheat; k++) {
             int st = atomic_load(&state[k]);
-            if (!(st & CHEAT_ON) || (st & (CHEAT_AT_LAUNCH | CHEAT_REFUSED)) || !cheats[k].n) continue;
+            int last = !(st & CHEAT_ON) && atomic_exchange(&closing[k], 0);
+            if ((!(st & CHEAT_ON) && !last) || (st & (CHEAT_AT_LAUNCH | CHEAT_REFUSED)) || !cheats[k].n) continue;
+            if (last) saved[k][15] = 1;
             char err[112] = "";
             env.ctx = cheats[k].name; env.saved = saved[k];
             if (!cheat_run(&cheats[k], &env, err, sizeof err) && err[0] && strcmp(err, problem[k])) {   // a failed read (pointer not set up yet) is silent
@@ -251,11 +254,11 @@ int runtime_cheats_set(int i, int on) {
     if (on && !(atomic_load(&state[k]) & CHEAT_REFUSED)) {
         char why[112] = "";
         if (backup_profile(why, sizeof why)) {
-            if (!(atomic_load(&state[k]) & CHEAT_ON)) memset(saved[k], 0, sizeof saved[k]);   // off: the cheat thread skips it
+            if (!(atomic_load(&state[k]) & CHEAT_ON)) { atomic_store(&closing[k], 0); memset(saved[k], 0, sizeof saved[k]); }   // off: the thread skips it
             atomic_fetch_or(&state[k], CHEAT_ON); problem[k][0] = 0;
         }
         else snprintf(problem[k], sizeof problem[k], "%s", why);
-    } else if (!on) atomic_fetch_and(&state[k], ~CHEAT_ON);
+    } else if (!on && (atomic_fetch_and(&state[k], ~CHEAT_ON) & CHEAT_ON)) atomic_store(&closing[k], 1);
     save_choices();
     int st = atomic_load(&state[k]);
     pthread_mutex_unlock(&mu);
