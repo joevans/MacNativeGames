@@ -361,7 +361,6 @@ static void cheats_all_off(void){for(int i=0;i<runtime_cheats_count();i++)if(run
 @implementation TOTKCheatMenu
 -(void)menuNeedsUpdate:(NSMenu *)menu{
  [menu removeAllItems];int n=runtime_cheats_count();
- if(!n){NSMenuItem *none=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("此 App 未内置作弊码","No cheats are built into this app")) action:nil keyEquivalent:@""];none.enabled=NO;[menu addItem:none];return;}
  for(int i=0;i<n;i++){
   int st=runtime_cheats_state(i);
   NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:cheat_title(i) action:(st&CHEAT_REFUSED)?nil:@selector(toggle:) keyEquivalent:@""];
@@ -476,7 +475,7 @@ static void front_install_menu(void){
  quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
  [appMenu addItem:quit];front_menubar_fps_add(menu);
  NSMenu *cheats=[[NSMenu alloc] initWithTitle:@(TOTK_UI("作弊","Cheats"))];cheatMenu=[TOTKCheatMenu new];cheats.delegate=cheatMenu;cheats.autoenablesItems=NO;
- NSMenuItem *cheatsItem=[NSMenuItem new];cheatsItem.submenu=cheats;[menu addItem:cheatsItem];
+ NSMenuItem *cheatsItem=[NSMenuItem new];cheatsItem.submenu=cheats;cheatsItem.hidden=!runtime_cheats_count();[menu addItem:cheatsItem];   // loaded before the window (loader.c)
  NSApp.mainMenu=menu;
 }
 static void *guest_main(void *callback){@autoreleasepool{((void(*)(void))callback)();}return NULL;}
