@@ -236,6 +236,27 @@ python3.14 games/totk/ios/tools/install_device.py ~/Games/TOTK-Vision.app --devi
 
 Install the visionOS platform in Xcode Settings › Components, pair the headset with Xcode and enable Developer Mode. For a build with `--update`, use that version's extracted image (`v112`, `v121` or `v143`) instead of `v0`; with `--work`, use the chosen work folder. The installer selects the native visionOS signing profile from the app. Game data uses the same existing 1 GiB parts and shader packs as iPhone/iPad. Native visionOS support currently covers Tears of the Kingdom only. A contributor reported playing 1.2.1 on an M2 Vision Pro with a DualSense; the current integration has not been tested on a headset.
 
+### One app for every game: the hub
+
+Add `--hub` to build the game into `MacNativeGames.app` (next to the game file, or `--hub /path/to/MacNativeGames.app`) instead of its own app. The hub opens on a card for each game built into it, with the game's versions as buttons under its title; versions found in your games folder but not built in yet show dashed, with a +. Pick a game with ← → (d-pad or left stick on a controller), a version with ↑ ↓ or L / R, and play with Return or A, or click the version and **Play**. Each build adds its game and version, so building the base game and then 1.4.3 into the same hub gives you both; building the same version again replaces it. `--all-versions` adds the base game and every supported update it finds next to the game file (or in `--updates-dir <folder>`) in one build. Each file is identified by its verified code, never by its name, and any file that is not a supported update is skipped with the reason. Every new version needs about 19 GB free in the work folder.
+
+```sh
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --hub
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.4.3.nsp --hub
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --hub --all-versions
+```
+
+**Your games folder.** The hub has a folder for your game files: `~/Games/MacNativeGames` unless you choose another one with **Change…** below the games (**Show in Finder** opens it). Put the base game (XCI or NSP), its updates (NSP or NSZ) and `prod.keys` there; a folder with the six `.bfttf` shared fonts, or a `firmware` folder, can go there too. Run the build with `--hub` and no game file, and it builds everything in that folder: each file is identified by its verified code, never by its name. The hub lists each file as in the hub, not added yet, or not used (with the reason). After the first build, **Add New Games…** runs the build again in Terminal for the new files, and the hub reopens when it is done. The build remembers the folder (`--library <folder>` changes it), the hub's location and its work folder in `~/Library/Application Support/MacNativeGames/library.json`.
+
+```sh
+python3.14 build_app.py --hub                                     # the games folder, into ~/Applications/MacNativeGames.app
+python3.14 build_app.py --hub --library ~/Games/Switch            # another folder, remembered for next time
+```
+
+Each game's tile shows how far its startup shaders are: before the first start, the share compiled into the app when it was built; after a start, how far that start's warm-up got. When a game closes, the hub comes back. The game's menu also has **Back to Game Hub** (⇧⌘B), and **Quit MacNativeGames** (⌥⌘Q) closes the game without bringing the hub back.
+
+As with a single-game app, everything in the hub is made from your own game files and keys at build time, and keys are never copied into it. Every game in the hub uses the same saves, settings and shader cache as its single-game app. `open MacNativeGames.app --env MNG_GAME=totk-v143` starts a game without showing the list, and the hub does not come back after it (the names are the folders in `Contents/Resources/games`).
+
 ### iPhone and iPad
 
 Version 1.4.3 has been played on an **iPhone 14 (iOS 26.6.1)** and an **iPad with the A16 chip (iPadOS 26.7.1)**, both signed with a personal development team in Xcode. Versions 1.0.0, 1.1.2 and 1.2.1 have not been tested on iOS. Breath of the Wild 1.6.0 has been played on the iPhone 14 (title, loading a save, walking around; October 23): build it with `--platform ios --ios-game-data documents` and install it with `games/totk/ios/tools/install_device.py` like Tears of the Kingdom. It fills the screen and renders at 960x540 with the game's own upscale to 1280x720, as Tears of the Kingdom does on the phone. 1.9.0 builds for the iPhone the same way (960x540 too) but has not been played on one yet. On the phone both games run at up to 60 fps, the screen's rate.
@@ -538,6 +559,27 @@ python3.14 build_app.py ~/Games/botw-base.nsp -k ~/keys/prod.keys --update ~/Gam
 王国之泪新增 `--platform visionos`，构建原生 visionOS 26 App：16:9 可缩放窗口、docked 1920×1080 输出、游戏手柄操作。当前是窗口内游玩，未接入沉浸式 VR、头部追踪或实验性立体 3D；visionOS 不支持的 MetalFX 补帧、时间抗锯齿保持关闭。
 
 安装方法见上面的 [Apple Vision Pro](#apple-vision-pro) 命令。先在 Xcode 设置的 Components 中安装 visionOS 平台组件、配对头显并开启开发者模式。`--ios-game-data documents` 沿用现有的游戏数据外置、1 GiB 分片和着色器打包传输，更新 App 时保留数据；安装器按 App 的平台选择签名。当前仅支持王国之泪。匿名贡献者报告在 M2 Vision Pro 上用 DualSense 游玩过 1.2.1，本次接入尚未做头显真机验证。
+
+### 一个 App 装下所有游戏：游戏大厅
+
+加上 `--hub`，游戏会打包进 `MacNativeGames.app`（默认放在游戏文件旁边，也可写 `--hub /路径/MacNativeGames.app`），而不是单独的 App。大厅为装在里面的每个游戏显示一张卡片，标题下方是它的各个版本；在游戏文件夹里找到、但还没打包进来的版本显示为带 + 的虚线按钮。用 ← →（手柄十字键或左摇杆）选游戏，↑ ↓ 或 L / R 选版本，回车或 A 键开始；也可以点版本再点 **开始**。每次打包会加入这次的游戏和版本，所以先打包本体、再把 1.4.3 打包进同一个大厅，两个版本都在；同一版本再打包一次会替换旧的。`--all-versions` 会一次打包本体，以及在游戏文件旁边（或 `--updates-dir <文件夹>` 里）找到的所有受支持的更新。每个文件都按校验过的代码识别，从不看文件名；不是受支持更新的文件会被跳过并说明原因。每个新版本需要工作文件夹里约 19 GB 空闲空间。
+
+```sh
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --hub
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --update ~/Games/1.4.3.nsp --hub
+python3.14 build_app.py ~/Games/totk.xci -k ~/keys/prod.keys --hub --all-versions
+```
+
+**你的游戏文件夹。** 大厅有一个放游戏文件的文件夹：默认是 `~/Games/MacNativeGames`，可以用游戏下方的 **更改…** 换成别的（**在访达中显示** 会打开它）。把本体（XCI 或 NSP）、更新（NSP 或 NSZ）和 `prod.keys` 放进去；装着六个 `.bfttf` 共享字体的文件夹或 `firmware` 文件夹也可以放进去。用 `--hub` 且不写游戏文件来打包，就会打包这个文件夹里的所有内容：每个文件都按校验过的代码识别，从不看文件名。大厅会列出每个文件：已在大厅、还没加入，或不使用（并说明原因）。第一次打包之后，**加入新游戏…** 会在终端里为新文件重新打包，完成后大厅自动重新打开。打包会把文件夹（用 `--library <文件夹>` 更改）、大厅的位置和工作文件夹记在 `~/Library/Application Support/MacNativeGames/library.json`。
+
+```sh
+python3.14 build_app.py --hub                                     # 游戏文件夹，打包到 ~/Applications/MacNativeGames.app
+python3.14 build_app.py --hub --library ~/Games/Switch            # 换一个文件夹，下次也用它
+```
+
+每个游戏的卡片会显示启动着色器的进度：第一次启动前，是打包时编译进 App 的比例；启动过之后，是那次预热完成的比例。关闭游戏后大厅会自动回来。游戏菜单里还有 **返回游戏大厅**（⇧⌘B）；**退出 MacNativeGames**（⌥⌘Q）会关闭游戏且不再回到大厅。
+
+和单独的 App 一样，大厅里的一切都是打包时用你自己的游戏文件和密钥生成的，密钥不会被复制进去。大厅里的游戏与对应的单独 App 共用存档、设置和着色器缓存。`open MacNativeGames.app --env MNG_GAME=totk-v143` 可跳过列表直接启动某个游戏，之后大厅不会自动回来（名称即 `Contents/Resources/games` 里的文件夹名）。
 
 ### iPhone 和 iPad
 

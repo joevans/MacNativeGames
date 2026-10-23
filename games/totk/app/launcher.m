@@ -3,6 +3,8 @@
 //   ~/Library/Application Support/MacNativeGames/TOTK/   profile (account, saves), shader cache, game slot, RomFS proof (BotW/ for Breath of the Wild)
 //   ~/Library/Logs/MacNativeGames/totk.log             this run, only with the debug log on (totk.previous.log: the one before; botw.log for Breath of the Wild)
 // If the game is already running, the launcher only brings it to the front.
+// In the hub app (hub/hub.m) this launcher is Contents/Resources/games/<id>/launcher and the hub starts it with
+// MNG_GAME_ROOT (that game's totk folder) and MNG_GAME_VERSION (its version, which the hub's Info.plist does not carry).
 #import <AppKit/AppKit.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -180,14 +182,17 @@ static BOOL make_dir(NSString *path) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        NSString *root = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"totk"];
+        const char *hubRoot = getenv("MNG_GAME_ROOT"), *hubVersion = getenv("MNG_GAME_VERSION");
+        NSString *root = hubRoot && *hubRoot ? @(hubRoot) : [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"totk"];
+        unsetenv("MNG_GAME_ROOT"); unsetenv("MNG_GAME_VERSION");   // not passed on to the game
         NSString *binary = [root stringByAppendingPathComponent:@"build/totk-native"];
         /* --check (build_app.py, once after packaging): only look that the game is there and exit. The first run of a new
            app is when macOS scans the whole bundle (minutes for 16 GB, with nothing on screen); doing it during the build
            makes the player's first start immediate. */
         if (argc > 1 && !strcmp(argv[1], "--check")) {
             int ok = access(binary.fileSystemRepresentation, X_OK) == 0;
-            NSString *declared = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+            NSString *declared = hubRoot && *hubRoot ? (hubVersion ? @(hubVersion) : nil)
+                                                     : [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
             ok = ok && [declared isEqualToString:@TOTK_GAME_VERSION];
             printf("%s: game version %s\n", ok ? "ok" : "missing binary or version mismatch", TOTK_GAME_VERSION);
             return ok ? 0 : 1;
@@ -271,6 +276,8 @@ int main(int argc, char **argv) {
         setenv("TOTK_SLOT_PURPOSE", "player", 0);
         NSString *contrib = env_or("TOTK_SHADER_CONTRIB", contrib_file(data));
         setenv("TOTK_SHADER_CONTRIB", contrib.fileSystemRepresentation, 1);
+        /* How far the shader warm-up got (runtime/frontend.m), which the hub app's game list shows. */
+        setenv("TOTK_SHADER_STATUS", [data stringByAppendingPathComponent:@"shader-status-" TOTK_GAME_DIR ".json"].fileSystemRepresentation, 0);
         contrib_reminder(contrib);
         unsetenv("TOTK_AUTOLOAD");   // the game starts at its title screen, as on the console
         /* runtime command channel (runtime/input.c): echo "shot ~/Desktop/shot.png" >> "<data>/input.txt" */
