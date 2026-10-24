@@ -1869,8 +1869,8 @@ def main(argv):
     cheats = args.cheats.expanduser().resolve() if args.cheats else None
     if cheats and not cheats.exists():
         raise BuildError(f'no such cheat file or folder: {cheats}')
-    if cheats and args.platform == 'ios':
-        raise BuildError('--cheats builds the Mac app\'s Cheats menu; the iPhone / iPad build has none yet (leave out --cheats)')
+    if cheats and device_app:
+        raise BuildError('--cheats builds the Mac app\'s Cheats menu; the iPhone / iPad and Vision Pro builds have none yet (leave out --cheats)')
     if firmware and not firmware.is_dir():
         raise BuildError(f'no firmware directory: {firmware}')
     if shared_fonts:
